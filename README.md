@@ -1,2 +1,2 @@
-# HotoChocolate.Extension.CollectionEnhancements
-HotoChocolate.Extension.CollectionEnhancements
+# HotChocolate.Extension.CollectionEnhancements
+HotChocolate.Extension.CollectionEnhancements
