@@ -1,2 +1,8 @@
 <Solution>
+  <Folder Name="/src/">
+    <Project Path="src/HotChocolate.Extensions.CollectionEnhancements/HotChocolate.Extensions.CollectionEnhancements.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/HotChocolate.Extensions.CollectionEnhancements.Tests/HotChocolate.Extensions.CollectionEnhancements.Tests.csproj" />
+  </Folder>
 </Solution>
