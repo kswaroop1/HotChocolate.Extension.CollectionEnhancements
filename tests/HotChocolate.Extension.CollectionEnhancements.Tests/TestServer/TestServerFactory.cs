@@ -20,9 +20,7 @@ public static class TestServerFactory
             .AddGraphQLServer()
             .AddQueryType<Query>()
             .ModifyRequestOptions(options => options.IncludeExceptionDetails = true)
-            .AddFiltering()
             .AddSorting()
-            .AddProjections()
             .AddCollectionEnhancements();
 
         return services.BuildServiceProvider();

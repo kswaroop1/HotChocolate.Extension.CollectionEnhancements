@@ -440,6 +440,31 @@ public static class DocumentedSpecCatalog
               }
             }
             """),
+        PendingFailure("N09", "Invalid string aggregate usage", """
+            query {
+              customers {
+                ordersAggregate {
+                  stringAgg(separator: ",") {
+                    total
+                  }
+                }
+              }
+            }
+            """),
+        PendingFailure("N10", "Invalid aggregate field inside parent filter", """
+            query {
+              customers(
+                where: {
+                  ordersAggregate: {
+                    having: { sum: { missingField: { gt: 1000 } } }
+                  }
+                }
+              ) {
+                id
+                name
+              }
+            }
+            """),
         PendingFailure("N02", "Invalid flat expand path traversal", """
             query {
               securitiesFlat(

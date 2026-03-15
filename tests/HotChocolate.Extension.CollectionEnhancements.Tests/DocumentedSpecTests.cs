@@ -6,7 +6,7 @@ namespace HotChocolate.Extension.CollectionEnhancements.Tests;
 [Trait("Suite", "ExecutableSpec")]
 public sealed class DocumentedSpecTests
 {
-    [Theory(Skip = "Pending collection enhancement implementation. The catalog remains executable-spec scaffolding for future work.")]
+    [Theory]
     [MemberData(nameof(DocumentedSpecCatalog.All), MemberType = typeof(DocumentedSpecCatalog))]
     public async Task Canonical_Documented_Examples_Should_Remain_Bound_To_Named_Spec_Cases(
         ExecutableSpecCase specCase)

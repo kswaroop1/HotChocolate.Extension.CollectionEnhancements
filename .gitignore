@@ -59,6 +59,7 @@ nunit-*.xml
 
 # Rider
 .idea/
+*.DotSettings.user
 
 # Visual Studio
 .vs/

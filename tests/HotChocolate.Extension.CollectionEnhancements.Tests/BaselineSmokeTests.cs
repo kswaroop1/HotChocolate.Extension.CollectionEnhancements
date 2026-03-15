@@ -123,12 +123,17 @@ public sealed class BaselineSmokeTests
 
         using var json = result.AssertSuccessfulJson();
         var data = json.RootElement.GetProperty("data");
+        var responseJson = json.RootElement.ToString();
 
-        var firstCustomer = data.GetProperty("customers").EnumerateArray().First();
+        var customers = data.GetProperty("customers").EnumerateArray().ToArray();
+        Assert.True(customers.Length > 0, responseJson);
+        var firstCustomer = customers.First();
         Assert.Equal("Alice Capital", firstCustomer.GetProperty("name").GetString());
         Assert.Equal(4, firstCustomer.GetProperty("orders").GetArrayLength());
 
-        var firstPerson = data.GetProperty("people").EnumerateArray().First();
+        var people = data.GetProperty("people").EnumerateArray().ToArray();
+        Assert.True(people.Length > 0, responseJson);
+        var firstPerson = people.First();
         Assert.Equal("Eve Trader", firstPerson.GetProperty("name").GetString());
         Assert.Equal(2, firstPerson.GetProperty("posts").GetArrayLength());
         Assert.Equal(4, firstPerson.GetProperty("orders").GetArrayLength());
