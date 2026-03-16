@@ -404,7 +404,7 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
             await next(context);
 
             var engine = context.Service<CollectionExecutionEngine>();
-            context.Result = engine.ApplyCollectionArguments(
+            context.Result = engine.ApplyCollectionArgumentsForField(
                 collectionField,
                 context.Result,
                 ResolverArgumentReader.GetOptionalArgument(context, "where"),

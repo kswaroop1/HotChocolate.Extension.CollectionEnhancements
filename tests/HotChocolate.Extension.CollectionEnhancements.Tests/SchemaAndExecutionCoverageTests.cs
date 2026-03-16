@@ -808,6 +808,10 @@ public sealed class SchemaAndExecutionCoverageTests
         Assert.NotEmpty(skippedFlatFilterRows);
 
         var scalarOperationsType = typeof(CollectionExecutionEngine);
+        Assert.True((bool)ReflectionTestSupport.InvokeStatic(scalarOperationsType, "MatchesScalarOperations", 5, new Dictionary<string, object?> { ["neq"] = 4 })!);
+        Assert.True((bool)ReflectionTestSupport.InvokeStatic(scalarOperationsType, "MatchesScalarOperations", 5, new Dictionary<string, object?> { ["in"] = new object?[] { 4, 5 } })!);
+        Assert.False((bool)ReflectionTestSupport.InvokeStatic(scalarOperationsType, "MatchesScalarOperations", 5, new Dictionary<string, object?> { ["in"] = new object?[] { 1, 2 } })!);
+        Assert.True((bool)ReflectionTestSupport.InvokeStatic(scalarOperationsType, "MatchesScalarOperations", 5, new Dictionary<string, object?> { ["nin"] = new object?[] { 1, 2 } })!);
         Assert.False((bool)ReflectionTestSupport.InvokeStatic(scalarOperationsType, "MatchesScalarOperations", 5, new Dictionary<string, object?> { ["lte"] = 4 })!);
         Assert.False((bool)ReflectionTestSupport.InvokeStatic(scalarOperationsType, "MatchesScalarOperations", 5, new Dictionary<string, object?> { ["nin"] = new object?[] { 4, 5 } })!);
         Assert.True((bool)ReflectionTestSupport.InvokeStatic(scalarOperationsType, "MatchesScalarOperations", 5, new Dictionary<string, object?> { ["eq"] = new Dictionary<string, object?>() })!);
