@@ -193,16 +193,36 @@ internal sealed partial class CollectionExecutionEngine
                 continue;
             }
 
-            if (model.CollectionFields.FirstOrDefault(field => field.AggregateFieldName == name) is not null ||
-                model.CollectionFields.FirstOrDefault(field => field.GroupFieldName == name) is not null)
+            if (model.CollectionFields.FirstOrDefault(field => field.AggregateFieldName == name) is { } aggregateField)
             {
-                if (InputValueNormalizer.AsDictionary(value).Count == 0)
+                if (!TryBuildAggregateCriteriaExpression(instance, aggregateField, value, out var aggregateExpression))
                 {
-                    continue;
+                    expression = null;
+                    return false;
                 }
 
-                expression = null;
-                return false;
+                if (aggregateExpression is not null)
+                {
+                    parts.Add(aggregateExpression);
+                }
+
+                continue;
+            }
+
+            if (model.CollectionFields.FirstOrDefault(field => field.GroupFieldName == name) is { } groupField)
+            {
+                if (!TryBuildGroupCriteriaExpression(instance, groupField, value, out var groupExpression))
+                {
+                    expression = null;
+                    return false;
+                }
+
+                if (groupExpression is not null)
+                {
+                    parts.Add(groupExpression);
+                }
+
+                continue;
             }
 
             expression = null;
@@ -233,18 +253,7 @@ internal sealed partial class CollectionExecutionEngine
                 return false;
             }
 
-            if (child is null)
-            {
-                if (isOr)
-                {
-                    expression = Expression.Constant(true);
-                    return true;
-                }
-
-                continue;
-            }
-
-            parts.Add(child);
+            parts.Add(child!);
         }
 
         if (isOr)
@@ -256,6 +265,333 @@ internal sealed partial class CollectionExecutionEngine
             }
 
             expression = CombineOr(parts);
+            return true;
+        }
+
+        expression = CombineAnd(parts);
+        return true;
+    }
+
+    private bool TryBuildAggregateCriteriaExpression(
+        Expression ownerInstance,
+        CollectionFieldModel collectionField,
+        object? criteriaValue,
+        out Expression? expression)
+    {
+        var criteria = InputValueNormalizer.AsDictionary(criteriaValue);
+        if (criteria.Count == 0)
+        {
+            expression = null;
+            return true;
+        }
+
+        if (!criteria.TryGetValue("having", out var havingValue) || InputValueNormalizer.IsEmpty(havingValue))
+        {
+            expression = null;
+            return true;
+        }
+
+        var collection = EnsureEnumerableCollection(BuildMemberAccess(ownerInstance, collectionField.Member), collectionField.ElementType);
+
+        if (criteria.TryGetValue("where", out var whereValue) &&
+            !TryApplyEnumerableObjectFilter(collectionField.ElementType, collection, whereValue, out collection))
+        {
+            expression = null;
+            return false;
+        }
+
+        return TryBuildHavingExpressionForSequence(
+            collectionField,
+            collection,
+            InputValueNormalizer.AsDictionary(havingValue),
+            out expression);
+    }
+
+    private bool TryBuildGroupCriteriaExpression(
+        Expression ownerInstance,
+        CollectionFieldModel collectionField,
+        object? criteriaValue,
+        out Expression? expression)
+    {
+        var criteria = InputValueNormalizer.AsDictionary(criteriaValue);
+        if (criteria.Count == 0)
+        {
+            expression = null;
+            return true;
+        }
+
+        var groupByFields = InputValueNormalizer.AsList(criteria.TryGetValue("by", out var byValue) ? byValue : null)
+            .Select(value => value?.ToString())
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Cast<string>()
+            .ToArray();
+
+        if (groupByFields.Length == 0)
+        {
+            expression = Expression.Constant(false);
+            return true;
+        }
+
+        if ((criteria.TryGetValue("order", out var orderValue) && !InputValueNormalizer.IsEmpty(orderValue)) ||
+            (criteria.TryGetValue("offset", out var offsetValue) && ConvertToNullableInt(offsetValue) is not null) ||
+            (criteria.TryGetValue("limit", out var limitValue) && ConvertToNullableInt(limitValue) is not null))
+        {
+            expression = null;
+            return false;
+        }
+
+        if (_catalog.TryGetObjectType(collectionField.ElementType) is not { } model)
+        {
+            expression = null;
+            return false;
+        }
+
+        var keyFields = new List<ScalarFieldModel>(groupByFields.Length);
+        foreach (var fieldName in groupByFields)
+        {
+            if (model.FindScalar(fieldName) is not { } scalarField)
+            {
+                expression = null;
+                return false;
+            }
+
+            keyFields.Add(scalarField);
+        }
+
+        var collection = EnsureEnumerableCollection(BuildMemberAccess(ownerInstance, collectionField.Member), collectionField.ElementType);
+
+        if (criteria.TryGetValue("where", out var whereValue) &&
+            !TryApplyEnumerableObjectFilter(collectionField.ElementType, collection, whereValue, out collection))
+        {
+            expression = null;
+            return false;
+        }
+
+        var groupParameter = Expression.Parameter(collectionField.ElementType, "item");
+        var keySelector = BuildKeySelectorLambda(collectionField.ElementType, keyFields, groupParameter, out var keyType);
+        var grouped = Expression.Call(
+            typeof(Enumerable),
+            nameof(Enumerable.GroupBy),
+            [collectionField.ElementType, keyType],
+            collection,
+            keySelector);
+
+        var groupingType = typeof(IGrouping<,>).MakeGenericType(keyType, collectionField.ElementType);
+        if (!criteria.TryGetValue("having", out var havingValue) || InputValueNormalizer.IsEmpty(havingValue))
+        {
+            expression = Expression.Call(
+                typeof(Enumerable),
+                nameof(Enumerable.Any),
+                [groupingType],
+                grouped);
+            return true;
+        }
+
+        var groupingParameter = Expression.Parameter(groupingType, "group");
+        if (!TryBuildHavingExpressionForSequence(
+                collectionField,
+                groupingParameter,
+                InputValueNormalizer.AsDictionary(havingValue),
+                out var groupPredicate))
+        {
+            expression = null;
+            return false;
+        }
+
+        expression = Expression.Call(
+            typeof(Enumerable),
+            nameof(Enumerable.Any),
+            [groupingType],
+            grouped,
+            Expression.Lambda(groupPredicate!, groupingParameter));
+        return true;
+    }
+
+    private bool TryApplyEnumerableObjectFilter(
+        Type elementType,
+        Expression source,
+        object? where,
+        out Expression filtered)
+    {
+        filtered = source;
+
+        if (where is null)
+        {
+            return true;
+        }
+
+        var normalizedWhere = InputValueNormalizer.AsDictionary(where);
+        if (normalizedWhere.Count == 0)
+        {
+            return true;
+        }
+
+        var parameter = Expression.Parameter(elementType, "item");
+        if (!TryBuildObjectFilterExpression(elementType, parameter, normalizedWhere, out var predicate))
+        {
+            return false;
+        }
+
+        if (predicate is null)
+        {
+            return true;
+        }
+
+        filtered = Expression.Call(
+            typeof(Enumerable),
+            nameof(Enumerable.Where),
+            [elementType],
+            source,
+            Expression.Lambda(predicate, parameter));
+        return true;
+    }
+
+    private bool TryBuildHavingExpressionForSequence(
+        CollectionFieldModel collectionField,
+        Expression sequence,
+        IReadOnlyDictionary<string, object?> having,
+        out Expression? expression)
+    {
+        var parts = new List<Expression>();
+
+        foreach (var (key, value) in having)
+        {
+            if (InputValueNormalizer.IsEmpty(value))
+            {
+                continue;
+            }
+
+            switch (key)
+            {
+                case "and":
+                    if (!TryBuildLogicalHavingExpression(collectionField, sequence, value, isOr: false, out var andExpression))
+                    {
+                        expression = null;
+                        return false;
+                    }
+
+                    if (andExpression is not null)
+                    {
+                        parts.Add(andExpression);
+                    }
+
+                    continue;
+
+                case "or":
+                    if (!TryBuildLogicalHavingExpression(collectionField, sequence, value, isOr: true, out var orExpression))
+                    {
+                        expression = null;
+                        return false;
+                    }
+
+                    if (orExpression is not null)
+                    {
+                        parts.Add(orExpression);
+                    }
+
+                    continue;
+
+                case "not":
+                    if (!TryBuildHavingExpressionForSequence(
+                            collectionField,
+                            sequence,
+                            InputValueNormalizer.AsDictionary(value),
+                            out var notExpression))
+                    {
+                        expression = null;
+                        return false;
+                    }
+
+                    parts.Add(Expression.Not(notExpression!));
+                    continue;
+
+                case "count":
+                {
+                    var count = Expression.Call(
+                        typeof(Enumerable),
+                        nameof(Enumerable.Count),
+                        [collectionField.ElementType],
+                        sequence);
+
+                    if (!TryBuildScalarOperationsExpression(count, InputValueNormalizer.AsDictionary(value), out var countExpression))
+                    {
+                        expression = null;
+                        return false;
+                    }
+
+                    if (countExpression is not null)
+                    {
+                        parts.Add(countExpression);
+                    }
+
+                    continue;
+                }
+            }
+
+            if (!TryParseSupportedQueryableAggregateOperator(key, out var aggregateOperator))
+            {
+                expression = null;
+                return false;
+            }
+
+            foreach (var (fieldName, operations) in InputValueNormalizer.AsDictionary(value))
+            {
+                if (InputValueNormalizer.IsEmpty(operations))
+                {
+                    continue;
+                }
+
+                if (!TryBuildQueryableAggregateValueExpression(collectionField, sequence, fieldName, aggregateOperator, out var aggregateValue))
+                {
+                    expression = null;
+                    return false;
+                }
+
+                if (!TryBuildScalarOperationsExpression(aggregateValue, InputValueNormalizer.AsDictionary(operations), out var aggregateExpression))
+                {
+                    expression = null;
+                    return false;
+                }
+
+                if (aggregateExpression is not null)
+                {
+                    parts.Add(aggregateExpression);
+                }
+            }
+        }
+
+        expression = CombineAnd(parts) ?? Expression.Constant(true);
+        return true;
+    }
+
+    private bool TryBuildLogicalHavingExpression(
+        CollectionFieldModel collectionField,
+        Expression sequence,
+        object? value,
+        bool isOr,
+        out Expression? expression)
+    {
+        var parts = new List<Expression>();
+        var hasItems = false;
+
+        foreach (var item in InputValueNormalizer.AsList(value))
+        {
+            hasItems = true;
+
+            if (!TryBuildHavingExpressionForSequence(collectionField, sequence, InputValueNormalizer.AsDictionary(item), out var child))
+            {
+                expression = null;
+                return false;
+            }
+
+            parts.Add(child!);
+        }
+
+        if (isOr)
+        {
+            expression = !hasItems
+                ? Expression.Constant(false)
+                : CombineOr(parts);
             return true;
         }
 
@@ -614,6 +950,562 @@ internal sealed partial class CollectionExecutionEngine
         return current;
     }
 
+    private bool TryCreateQueryableAggregateSelection(
+        CollectionFieldModel collectionField,
+        object? sourceValue,
+        object? where,
+        out AggregateSelectionContext selection)
+    {
+        selection = null!;
+
+        if (sourceValue is not IQueryable queryable)
+        {
+            return false;
+        }
+
+        if (!TryApplyQueryableObjectFilter(collectionField.ElementType, queryable, where, out var filtered))
+        {
+            return false;
+        }
+
+        selection = new AggregateSelectionContext(collectionField, isFlat: false, filtered);
+        return true;
+    }
+
+    private bool TryCreateQueryableGroupRows(
+        CollectionFieldModel collectionField,
+        object? sourceValue,
+        IReadOnlyList<string> groupByFields,
+        object? where,
+        out IReadOnlyList<GroupRowResult> groups)
+    {
+        groups = [];
+
+        if (sourceValue is not IQueryable queryable)
+        {
+            return false;
+        }
+
+        if (_catalog.TryGetObjectType(collectionField.ElementType) is not { } model)
+        {
+            return false;
+        }
+
+        var keyFields = new List<ScalarFieldModel>(groupByFields.Count);
+        foreach (var fieldName in groupByFields)
+        {
+            if (model.FindScalar(fieldName) is not { } scalarField)
+            {
+                return false;
+            }
+
+            keyFields.Add(scalarField);
+        }
+
+        if (!TryApplyQueryableObjectFilter(collectionField.ElementType, queryable, where, out var filtered))
+        {
+            return false;
+        }
+
+        if (!TryExecuteQueryableDistinctKeys(filtered, keyFields, out var distinctKeys))
+        {
+            return false;
+        }
+
+        groups = distinctKeys
+            .Select(key =>
+            {
+                var keyDictionary = CreateKeyDictionary(keyFields, key);
+                var subgroup = ApplyQueryableKeyFilter(filtered, keyFields, key);
+                return new GroupRowResult(keyDictionary, new AggregateSelectionContext(collectionField, isFlat: false, subgroup));
+            })
+            .ToArray();
+
+        return true;
+    }
+
+    private bool TryResolveQueryableAggregate(
+        AggregateSelectionContext selection,
+        string fieldName,
+        AggregateOperator aggregateOperator,
+        out object? value)
+    {
+        value = null;
+
+        if (selection.IsFlat || selection.QueryableSource is not { } queryable)
+        {
+            return false;
+        }
+
+        if (_catalog.TryGetObjectType(selection.CollectionField.ElementType) is not { } model ||
+            model.FindScalar(fieldName) is not { } scalarField)
+        {
+            return false;
+        }
+
+        value = aggregateOperator switch
+        {
+            AggregateOperator.CountDistinct => ExecuteQueryableCountDistinct(queryable, scalarField),
+            AggregateOperator.Sum => ExecuteQueryableNumericAggregate(queryable, scalarField, nameof(Queryable.Sum)),
+            AggregateOperator.Avg => ExecuteQueryableNumericAggregate(queryable, scalarField, nameof(Queryable.Average)),
+            AggregateOperator.Min => ExecuteQueryableMinOrMax(queryable, scalarField, min: true),
+            AggregateOperator.Max => ExecuteQueryableMinOrMax(queryable, scalarField, min: false),
+            _ => UnsupportedAggregateValue.Instance
+        };
+
+        if (ReferenceEquals(value, UnsupportedAggregateValue.Instance))
+        {
+            value = null;
+            return false;
+        }
+
+        return true;
+    }
+
+    private static int ExecuteQueryableCount(IQueryable queryable)
+    {
+        var call = Expression.Call(
+            typeof(Queryable),
+            nameof(Queryable.Count),
+            [queryable.ElementType],
+            queryable.Expression);
+
+        return Convert.ToInt32(queryable.Provider.Execute(call), CultureInfo.InvariantCulture);
+    }
+
+    private object ExecuteQueryableCountDistinct(IQueryable queryable, ScalarFieldModel scalarField)
+    {
+        var parameter = Expression.Parameter(queryable.ElementType, "row");
+        var member = BuildMemberAccess(parameter, scalarField.Member);
+
+        Expression source = queryable.Expression;
+        if (CanBeNull(member.Type))
+        {
+            var notNull = Expression.Lambda(
+                Expression.NotEqual(member, Expression.Constant(null, member.Type)),
+                parameter);
+
+            source = Expression.Call(
+                typeof(Queryable),
+                nameof(Queryable.Where),
+                [queryable.ElementType],
+                source,
+                Expression.Quote(notNull));
+        }
+
+        var selected = Expression.Call(
+            typeof(Queryable),
+            nameof(Queryable.Select),
+            [queryable.ElementType, member.Type],
+            source,
+            Expression.Quote(Expression.Lambda(member, parameter)));
+
+        var distinct = Expression.Call(
+            typeof(Queryable),
+            nameof(Queryable.Distinct),
+            [member.Type],
+            selected);
+
+        var count = Expression.Call(
+            typeof(Queryable),
+            nameof(Queryable.Count),
+            [member.Type],
+            distinct);
+
+        return Convert.ToInt32(queryable.Provider.Execute(count), CultureInfo.InvariantCulture);
+    }
+
+    private object? ExecuteQueryableNumericAggregate(IQueryable queryable, ScalarFieldModel scalarField, string methodName)
+    {
+        if (!TypeInspection.IsNumeric(scalarField.ClrType))
+        {
+            return UnsupportedAggregateValue.Instance;
+        }
+
+        var parameter = Expression.Parameter(queryable.ElementType, "row");
+        var member = BuildMemberAccess(parameter, scalarField.Member);
+        var convertedMember = Expression.Convert(member, typeof(double?));
+
+        var selected = Expression.Call(
+            typeof(Queryable),
+            nameof(Queryable.Select),
+            [queryable.ElementType, typeof(double?)],
+            queryable.Expression,
+            Expression.Quote(Expression.Lambda(convertedMember, parameter)));
+
+        var aggregateCall = Expression.Call(typeof(Queryable), methodName, Type.EmptyTypes, selected);
+        var result = queryable.Provider.Execute(aggregateCall);
+
+        return result is null
+            ? null
+            : Convert.ToDouble(result, CultureInfo.InvariantCulture);
+    }
+
+    private object? ExecuteQueryableMinOrMax(IQueryable queryable, ScalarFieldModel scalarField, bool min)
+    {
+        var parameter = Expression.Parameter(queryable.ElementType, "row");
+        var member = BuildMemberAccess(parameter, scalarField.Member);
+
+        Expression source = queryable.Expression;
+        if (CanBeNull(member.Type))
+        {
+            var notNull = Expression.Lambda(
+                Expression.NotEqual(member, Expression.Constant(null, member.Type)),
+                parameter);
+
+            source = Expression.Call(
+                typeof(Queryable),
+                nameof(Queryable.Where),
+                [queryable.ElementType],
+                source,
+                Expression.Quote(notNull));
+        }
+
+        var selected = Expression.Call(
+            typeof(Queryable),
+            nameof(Queryable.Select),
+            [queryable.ElementType, member.Type],
+            source,
+            Expression.Quote(Expression.Lambda(member, parameter)));
+
+        var any = Expression.Call(typeof(Queryable), nameof(Queryable.Any), [member.Type], selected);
+        if (!(bool)queryable.Provider.Execute(any)!)
+        {
+            return null;
+        }
+
+        try
+        {
+            var methodName = min ? nameof(Queryable.Min) : nameof(Queryable.Max);
+            var aggregateCall = Expression.Call(typeof(Queryable), methodName, [member.Type], selected);
+            return queryable.Provider.Execute(aggregateCall);
+        }
+        catch
+        {
+            return UnsupportedAggregateValue.Instance;
+        }
+    }
+
+    private bool TryExecuteQueryableDistinctKeys(
+        IQueryable queryable,
+        IReadOnlyList<ScalarFieldModel> keyFields,
+        out IReadOnlyList<object?> keys)
+    {
+        keys = [];
+
+        var parameter = Expression.Parameter(queryable.ElementType, "row");
+        var keySelector = BuildKeySelectorLambda(queryable.ElementType, keyFields, parameter, out var keyType);
+
+        try
+        {
+            var selected = Expression.Call(
+                typeof(Queryable),
+                nameof(Queryable.Select),
+                [queryable.ElementType, keyType],
+                queryable.Expression,
+                Expression.Quote(keySelector));
+
+            var distinct = Expression.Call(
+                typeof(Queryable),
+                nameof(Queryable.Distinct),
+                [keyType],
+                selected);
+
+            var distinctQuery = queryable.Provider.CreateQuery(distinct);
+            keys = distinctQuery.Cast<object?>().ToArray();
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private IQueryable ApplyQueryableKeyFilter(
+        IQueryable queryable,
+        IReadOnlyList<ScalarFieldModel> keyFields,
+        object? keyValue)
+    {
+        var values = ExtractKeyValues(keyValue, keyFields.Count);
+        var parameter = Expression.Parameter(queryable.ElementType, "row");
+        var parts = new List<Expression>(keyFields.Count);
+
+        for (var index = 0; index < keyFields.Count; index++)
+        {
+            var member = BuildMemberAccess(parameter, keyFields[index].Member);
+            TryCreateTypedConstant(member.Type, values[index], out var constant);
+            parts.Add(Expression.Equal(member, constant));
+        }
+
+        var predicate = CombineAnd(parts) ?? Expression.Constant(true);
+        var where = Expression.Call(
+            typeof(Queryable),
+            nameof(Queryable.Where),
+            [queryable.ElementType],
+            queryable.Expression,
+            Expression.Quote(Expression.Lambda(predicate, parameter)));
+
+        return queryable.Provider.CreateQuery(where);
+    }
+
+    private IReadOnlyDictionary<string, object?> CreateKeyDictionary(
+        IReadOnlyList<ScalarFieldModel> keyFields,
+        object? keyValue)
+    {
+        var values = ExtractKeyValues(keyValue, keyFields.Count);
+        var dictionary = new Dictionary<string, object?>(StringComparer.Ordinal);
+
+        for (var index = 0; index < keyFields.Count; index++)
+        {
+            dictionary[keyFields[index].GraphQlName] = values[index];
+        }
+
+        return dictionary;
+    }
+
+    private static object?[] ExtractKeyValues(object? keyValue, int expectedCount)
+    {
+        if (expectedCount == 1)
+        {
+            return [keyValue];
+        }
+
+        var values = new List<object?>(expectedCount);
+        UnpackTupleValues(keyValue, values);
+        return values.Take(expectedCount).ToArray();
+    }
+
+    private static void UnpackTupleValues(object? tuple, List<object?> values)
+    {
+        if (tuple is null)
+        {
+            values.Add(null);
+            return;
+        }
+
+        var type = tuple.GetType();
+        if (!type.FullName!.StartsWith("System.ValueTuple`", StringComparison.Ordinal))
+        {
+            values.Add(tuple);
+            return;
+        }
+
+        var fields = type.GetFields(BindingFlags.Public | BindingFlags.Instance)
+            .OrderBy(field => field.Name, StringComparer.Ordinal)
+            .ToArray();
+
+        foreach (var field in fields)
+        {
+            var fieldValue = field.GetValue(tuple);
+            if (field.Name == "Rest")
+            {
+                UnpackTupleValues(fieldValue, values);
+            }
+            else
+            {
+                values.Add(fieldValue);
+            }
+        }
+    }
+
+    private static LambdaExpression BuildKeySelectorLambda(
+        Type elementType,
+        IReadOnlyList<ScalarFieldModel> keyFields,
+        ParameterExpression parameter,
+        out Type keyType)
+    {
+        var members = keyFields
+            .Select(field => BuildMemberAccess(parameter, field.Member))
+            .ToArray();
+
+        var keyExpression = BuildCompositeKeyExpression(members, out keyType);
+        return Expression.Lambda(keyExpression, parameter);
+    }
+
+    private static Expression BuildCompositeKeyExpression(
+        IReadOnlyList<Expression> values,
+        out Type keyType)
+    {
+        if (values.Count == 1)
+        {
+            keyType = values[0].Type;
+            return values[0];
+        }
+
+        if (values.Count > 7)
+        {
+            throw new NotSupportedException("Queryable grouping supports up to seven key fields.");
+        }
+
+        var tupleDefinition = Type.GetType($"System.ValueTuple`{values.Count}", throwOnError: true)!;
+        var tupleTypes = values.Select(value => value.Type).ToArray();
+        keyType = tupleDefinition.MakeGenericType(tupleTypes);
+        var constructor = keyType.GetConstructors().Single();
+
+        return Expression.New(constructor, values);
+    }
+
+    private static Expression EnsureEnumerableCollection(Expression collectionExpression, Type elementType)
+    {
+        var targetType = typeof(IEnumerable<>).MakeGenericType(elementType);
+        var converted = collectionExpression.Type == targetType
+            ? collectionExpression
+            : Expression.Convert(collectionExpression, targetType);
+
+        if (!CanBeNull(collectionExpression.Type))
+        {
+            return converted;
+        }
+
+        var emptyArray = Array.CreateInstance(elementType, 0);
+        var emptyEnumerable = Expression.Convert(Expression.Constant(emptyArray, emptyArray.GetType()), targetType);
+        return Expression.Coalesce(converted, emptyEnumerable);
+    }
+
+    private bool TryBuildQueryableAggregateValueExpression(
+        CollectionFieldModel collectionField,
+        Expression sequence,
+        string fieldName,
+        AggregateOperator aggregateOperator,
+        out Expression expression)
+    {
+        expression = null!;
+
+        if (_catalog.TryGetObjectType(collectionField.ElementType) is not { } model ||
+            model.FindScalar(fieldName) is not { } scalarField)
+        {
+            return false;
+        }
+
+        var parameter = Expression.Parameter(collectionField.ElementType, "item");
+        var member = BuildMemberAccess(parameter, scalarField.Member);
+        var selected = Expression.Call(
+            typeof(Enumerable),
+            nameof(Enumerable.Select),
+            [collectionField.ElementType, member.Type],
+            sequence,
+            Expression.Lambda(member, parameter));
+
+        switch (aggregateOperator)
+        {
+            case AggregateOperator.CountDistinct:
+                if (CanBeNull(member.Type))
+                {
+                    var notNullPredicate = Expression.Lambda(
+                        Expression.NotEqual(member, Expression.Constant(null, member.Type)),
+                        parameter);
+
+                    selected = Expression.Call(
+                        typeof(Enumerable),
+                        nameof(Enumerable.Where),
+                        [collectionField.ElementType],
+                        sequence,
+                        notNullPredicate);
+
+                    selected = Expression.Call(
+                        typeof(Enumerable),
+                        nameof(Enumerable.Select),
+                        [collectionField.ElementType, member.Type],
+                        selected,
+                        Expression.Lambda(member, parameter));
+                }
+
+                var distinct = Expression.Call(
+                    typeof(Enumerable),
+                    nameof(Enumerable.Distinct),
+                    [member.Type],
+                    selected);
+
+                expression = Expression.Call(
+                    typeof(Enumerable),
+                    nameof(Enumerable.Count),
+                    [member.Type],
+                    distinct);
+                return true;
+
+            case AggregateOperator.Sum:
+            case AggregateOperator.Avg:
+                if (!TypeInspection.IsNumeric(scalarField.ClrType))
+                {
+                    return false;
+                }
+
+                var numericProjection = Expression.Call(
+                    typeof(Enumerable),
+                    nameof(Enumerable.Select),
+                    [collectionField.ElementType, typeof(double?)],
+                    sequence,
+                    Expression.Lambda(Expression.Convert(member, typeof(double?)), parameter));
+
+                expression = Expression.Call(
+                    typeof(Enumerable),
+                    aggregateOperator == AggregateOperator.Sum ? nameof(Enumerable.Sum) : nameof(Enumerable.Average),
+                    Type.EmptyTypes,
+                    numericProjection);
+                return true;
+
+            case AggregateOperator.Min:
+            case AggregateOperator.Max:
+                Expression minMaxSequence = selected;
+
+                if (CanBeNull(member.Type))
+                {
+                    var notNullPredicate = Expression.Lambda(
+                        Expression.NotEqual(member, Expression.Constant(null, member.Type)),
+                        parameter);
+
+                    var filteredSequence = Expression.Call(
+                        typeof(Enumerable),
+                        nameof(Enumerable.Where),
+                        [collectionField.ElementType],
+                        sequence,
+                        notNullPredicate);
+
+                    minMaxSequence = Expression.Call(
+                        typeof(Enumerable),
+                        nameof(Enumerable.Select),
+                        [collectionField.ElementType, member.Type],
+                        filteredSequence,
+                        Expression.Lambda(member, parameter));
+                }
+
+                expression = Expression.Call(
+                    typeof(Enumerable),
+                    aggregateOperator == AggregateOperator.Min ? nameof(Enumerable.Min) : nameof(Enumerable.Max),
+                    [member.Type],
+                    minMaxSequence);
+                return true;
+
+            default:
+                return false;
+        }
+    }
+
+    private static bool TryParseSupportedQueryableAggregateOperator(string name, out AggregateOperator aggregateOperator)
+    {
+        switch (name)
+        {
+            case "countDistinct":
+                aggregateOperator = AggregateOperator.CountDistinct;
+                return true;
+            case "sum":
+                aggregateOperator = AggregateOperator.Sum;
+                return true;
+            case "avg":
+                aggregateOperator = AggregateOperator.Avg;
+                return true;
+            case "min":
+                aggregateOperator = AggregateOperator.Min;
+                return true;
+            case "max":
+                aggregateOperator = AggregateOperator.Max;
+                return true;
+            default:
+                aggregateOperator = default;
+                return false;
+        }
+    }
+
     private static Expression BuildMemberAccess(Expression instance, MemberInfo member) =>
         member switch
         {
@@ -634,4 +1526,9 @@ internal sealed partial class CollectionExecutionEngine
 
     private static bool CanBeNull(Type type) =>
         !type.IsValueType || Nullable.GetUnderlyingType(type) is not null;
+
+    private sealed class UnsupportedAggregateValue
+    {
+        public static UnsupportedAggregateValue Instance { get; } = new();
+    }
 }

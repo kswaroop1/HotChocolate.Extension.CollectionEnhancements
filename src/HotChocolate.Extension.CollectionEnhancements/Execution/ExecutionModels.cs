@@ -17,18 +17,77 @@ internal enum AggregateOperator
     StringAggDistinct
 }
 
-internal sealed class AggregateSelectionContext(
-    CollectionFieldModel collectionField,
-    bool isFlat,
-    IReadOnlyList<object> rows)
+internal sealed class AggregateSelectionContext
 {
-    public CollectionFieldModel CollectionField { get; } = collectionField;
+    private readonly Func<IReadOnlyList<object>> _rowsFactory;
+    private readonly Dictionary<string, object?> _aggregateCache = new(StringComparer.Ordinal);
+    private readonly Lock _sync = new();
+    private IReadOnlyList<object>? _rows;
 
-    public bool IsFlat { get; } = isFlat;
+    public AggregateSelectionContext(
+        CollectionFieldModel collectionField,
+        bool isFlat,
+        IReadOnlyList<object> rows)
+    {
+        CollectionField = collectionField;
+        IsFlat = isFlat;
+        _rows = rows;
+        _rowsFactory = static () => [];
+    }
 
-    public IReadOnlyList<object> Rows { get; } = rows;
+    public AggregateSelectionContext(
+        CollectionFieldModel collectionField,
+        bool isFlat,
+        IQueryable queryable)
+    {
+        CollectionField = collectionField;
+        IsFlat = isFlat;
+        QueryableSource = queryable;
+        _rowsFactory = () => queryable.Cast<object>().ToArray();
+    }
+
+    public CollectionFieldModel CollectionField { get; }
+
+    public bool IsFlat { get; }
+
+    public IQueryable? QueryableSource { get; }
+
+    public IReadOnlyList<object> Rows
+    {
+        get
+        {
+            lock (_sync)
+            {
+                _rows ??= _rowsFactory();
+                return _rows;
+            }
+        }
+    }
 
     public string ResultPrefix => IsFlat ? "Flat" : string.Empty;
+
+    public bool TryGetCachedAggregate(string key, out object? value)
+    {
+        lock (_sync)
+        {
+            return _aggregateCache.TryGetValue(key, out value);
+        }
+    }
+
+    public object? GetOrAddCachedAggregate(string key, Func<object?> factory)
+    {
+        lock (_sync)
+        {
+            if (_aggregateCache.TryGetValue(key, out var existing))
+            {
+                return existing;
+            }
+
+            var value = factory();
+            _aggregateCache[key] = value;
+            return value;
+        }
+    }
 }
 
 internal sealed class AggregateProjection(

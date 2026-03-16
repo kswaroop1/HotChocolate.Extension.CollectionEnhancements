@@ -28,6 +28,14 @@ internal sealed partial class CollectionExecutionEngine(CollectionSchemaCatalog 
         bool isFlat,
         IReadOnlyList<string>? expand)
     {
+        if (!isFlat &&
+            TryCreateQueryableAggregateSelection(collectionField, sourceValue, where, out var queryableSelection))
+        {
+            return PassesHaving(queryableSelection, having)
+                ? queryableSelection
+                : null;
+        }
+
         var rows = isFlat
             ? ApplyFlatArguments(collectionField, sourceValue, expand ?? [], where, order: null, offset: null, limit: null)
             : ApplyCollectionArguments(collectionField, sourceValue, where, order: null, offset: null, limit: null);
@@ -48,10 +56,6 @@ internal sealed partial class CollectionExecutionEngine(CollectionSchemaCatalog 
         bool isFlat,
         IReadOnlyList<string>? expand)
     {
-        var rows = isFlat
-            ? ApplyFlatArguments(collectionField, sourceValue, expand ?? [], where, order: null, offset: null, limit: null)
-            : ApplyCollectionArguments(collectionField, sourceValue, where, order: null, offset: null, limit: null);
-
         var groupByFields = InputValueNormalizer.AsList(by)
             .Select(value => value?.ToString())
             .Where(value => !string.IsNullOrWhiteSpace(value))
@@ -62,6 +66,21 @@ internal sealed partial class CollectionExecutionEngine(CollectionSchemaCatalog 
         {
             return [];
         }
+
+        if (!isFlat &&
+            TryCreateQueryableGroupRows(collectionField, sourceValue, groupByFields, where, out var queryableGroups))
+        {
+            var filteredQueryableGroups = queryableGroups
+                .Where(group => PassesHaving(group.Selection, having))
+                .ToArray();
+
+            var orderedQueryableGroups = ApplyGroupSort(filteredQueryableGroups, order);
+            return ApplyGroupWindow(orderedQueryableGroups, offset, limit);
+        }
+
+        var rows = isFlat
+            ? ApplyFlatArguments(collectionField, sourceValue, expand ?? [], where, order: null, offset: null, limit: null)
+            : ApplyCollectionArguments(collectionField, sourceValue, where, order: null, offset: null, limit: null);
 
         var groupedRows = rows
             .GroupBy(row => BuildGroupKey(collectionField, row, groupByFields, isFlat), GroupKeyComparer.Instance)
@@ -121,6 +140,20 @@ internal sealed partial class CollectionExecutionEngine(CollectionSchemaCatalog 
 
     public int ResolveCount(AggregateSelectionContext selection, object? where)
     {
+        if (!selection.IsFlat &&
+            selection.QueryableSource is { } queryable)
+        {
+            if (where is null)
+            {
+                return ExecuteQueryableCount(queryable);
+            }
+
+            if (TryApplyQueryableObjectFilter(selection.CollectionField.ElementType, queryable, where, out var filtered))
+            {
+                return ExecuteQueryableCount(filtered);
+            }
+        }
+
         if (where is null)
         {
             return selection.Rows.Count;
@@ -132,6 +165,14 @@ internal sealed partial class CollectionExecutionEngine(CollectionSchemaCatalog 
     }
 
     public object? ResolveAggregateProjectionField(AggregateProjection projection, string fieldName)
+    {
+        var cacheKey = $"{projection.Operator}:{fieldName}:{projection.Separator}:{FormatOrderCacheKey(projection.Order)}";
+        return projection.Selection.GetOrAddCachedAggregate(
+            cacheKey,
+            () => ResolveAggregateProjectionFieldCore(projection, fieldName));
+    }
+
+    private object? ResolveAggregateProjectionFieldCore(AggregateProjection projection, string fieldName)
     {
         return projection.Operator switch
         {
@@ -552,6 +593,11 @@ internal sealed partial class CollectionExecutionEngine(CollectionSchemaCatalog 
         };
     }
 
+    private static string FormatOrderCacheKey(IReadOnlyList<(string FieldName, bool Descending)>? order) =>
+        order is null || order.Count == 0
+            ? string.Empty
+            : string.Join("|", order.Select(clause => $"{clause.FieldName}:{clause.Descending}"));
+
     private IReadOnlyList<object> ExpandRows(
         CollectionFieldModel collectionField,
         IReadOnlyList<object> baseRows,
@@ -766,16 +812,23 @@ internal sealed partial class CollectionExecutionEngine(CollectionSchemaCatalog 
     }
 
     private int GetDistinctCount(AggregateSelectionContext selection, string fieldName) =>
-        selection.Rows
-            .Select(row => selection.IsFlat
-                ? ((IReadOnlyDictionary<string, object?>)row).GetValueOrDefault(fieldName)
-                : ResolveFieldValue(selection.CollectionField.ElementType, row, fieldName, isFlat: false))
-            .Where(value => value is not null)
-            .Distinct(ProjectionEqualityComparer.Instance)
-            .Count();
+        TryResolveQueryableAggregate(selection, fieldName, AggregateOperator.CountDistinct, out var value)
+            ? Convert.ToInt32(value, System.Globalization.CultureInfo.InvariantCulture)
+            : selection.Rows
+                .Select(row => selection.IsFlat
+                    ? ((IReadOnlyDictionary<string, object?>)row).GetValueOrDefault(fieldName)
+                    : ResolveFieldValue(selection.CollectionField.ElementType, row, fieldName, isFlat: false))
+                .Where(value => value is not null)
+                .Distinct(ProjectionEqualityComparer.Instance)
+                .Count();
 
     private object? GetMinOrMax(AggregateSelectionContext selection, string fieldName, bool min)
     {
+        if (TryResolveQueryableAggregate(selection, fieldName, min ? AggregateOperator.Min : AggregateOperator.Max, out var queryableValue))
+        {
+            return queryableValue;
+        }
+
         var values = selection.Rows
             .Select(row => selection.IsFlat
                 ? ((IReadOnlyDictionary<string, object?>)row).GetValueOrDefault(fieldName)
@@ -834,6 +887,19 @@ internal sealed partial class CollectionExecutionEngine(CollectionSchemaCatalog 
 
     private object? GetNumericAggregate(AggregateSelectionContext selection, string fieldName, NumericAggregate aggregate)
     {
+        AggregateOperator? providerAwareOperator = aggregate switch
+        {
+            NumericAggregate.Sum => AggregateOperator.Sum,
+            NumericAggregate.Average => AggregateOperator.Avg,
+            _ => null
+        };
+
+        if (providerAwareOperator is { } operatorValue &&
+            TryResolveQueryableAggregate(selection, fieldName, operatorValue, out var queryableValue))
+        {
+            return queryableValue;
+        }
+
         var values = selection.Rows
             .Select(row => selection.IsFlat
                 ? ((IReadOnlyDictionary<string, object?>)row).GetValueOrDefault(fieldName)

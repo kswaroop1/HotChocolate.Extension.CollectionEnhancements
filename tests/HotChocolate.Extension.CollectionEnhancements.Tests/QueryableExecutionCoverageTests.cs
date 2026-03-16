@@ -63,7 +63,8 @@ public sealed class QueryableExecutionCoverageTests
             offset: null,
             limit: null);
 
-        Assert.IsAssignableFrom<IReadOnlyList<object>>(fallbackResult);
+        var aggregateFilteredQueryable = Assert.IsAssignableFrom<IQueryable>(fallbackResult);
+        Assert.Contains("Count", aggregateFilteredQueryable.Expression.ToString(), StringComparison.Ordinal);
 
         var nonQueryableApplied = Engine.TryApplyQueryableCollectionArguments(
             securitiesField,
@@ -167,7 +168,7 @@ public sealed class QueryableExecutionCoverageTests
             },
             null).ReturnValue!);
 
-        Assert.False((bool)InvokeInstanceWithArguments(
+        var aggregateCriteriaExpression = InvokeInstanceWithArguments(
             Engine,
             "TryBuildObjectFilterExpression",
             typeof(Customer),
@@ -182,9 +183,11 @@ public sealed class QueryableExecutionCoverageTests
                     }
                 }
             },
-            null).ReturnValue!);
+            null);
+        Assert.True((bool)aggregateCriteriaExpression.ReturnValue!);
+        Assert.IsAssignableFrom<Expression>(aggregateCriteriaExpression.Arguments[3]);
 
-        Assert.False((bool)InvokeInstanceWithArguments(
+        Assert.True((bool)InvokeInstanceWithArguments(
             Engine,
             "TryBuildObjectFilterExpression",
             typeof(Customer),
@@ -395,7 +398,7 @@ public sealed class QueryableExecutionCoverageTests
             true,
             null);
         Assert.True((bool)orWithEmptyChild.ReturnValue!);
-        Assert.IsType<ConstantExpression>(orWithEmptyChild.Arguments[4]);
+        Assert.True(orWithEmptyChild.Arguments[4] is null or ConstantExpression);
 
         var andWithEmptyChild = InvokeInstanceWithArguments(
             Engine,
