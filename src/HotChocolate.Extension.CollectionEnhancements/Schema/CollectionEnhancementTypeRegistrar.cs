@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Reflection;
 using HotChocolate.Execution.Configuration;
 using HotChocolate.Extension.CollectionEnhancements.Execution;
@@ -12,6 +13,8 @@ namespace HotChocolate.Extension.CollectionEnhancements.Schema;
 
 internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog catalog)
 {
+    private static readonly ImmutableArray<string> LimitSlicingArgument = ImmutableArray.Create("limit");
+
     private readonly CollectionSchemaCatalog _catalog = catalog;
 
     public void Register(IRequestExecutorBuilder builder)
@@ -140,6 +143,11 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
 
     private void RegisterObjectSortType(IRequestExecutorBuilder builder, ObjectTypeModel objectType)
     {
+        if (objectType.ScalarFields.Count == 0)
+        {
+            return;
+        }
+
         builder.AddType(new InputObjectType(descriptor =>
         {
             descriptor.Name(objectType.SortInputName);
@@ -394,10 +402,22 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
 
     private static void ConfigureCollectionField(IObjectFieldDescriptor field, CollectionFieldModel collectionField)
     {
-        field.Argument("where", argument => argument.Type(GraphQlTypeReferenceHelper.Parse(collectionField.FilterInputName)))
-            .Argument("order", argument => argument.Type(GraphQlTypeReferenceHelper.Parse($"[{collectionField.SortInputName}!]")))
-            .Argument("offset", argument => argument.Type<IntType>())
-            .Argument("limit", argument => argument.Type<IntType>());
+        field.Argument("where", argument => argument.Type(GraphQlTypeReferenceHelper.Parse(collectionField.FilterInputName)).Cost(8))
+            .Argument("order", argument => argument.Type(GraphQlTypeReferenceHelper.Parse($"[{collectionField.SortInputName}!]")).Cost(6))
+            .Argument("offset", argument => argument.Type<IntType>().Cost(2))
+            .Argument("limit", argument => argument.Type<IntType>().Cost(2))
+            .Cost(6)
+            .ListSize(
+                assumedSize: null,
+                slicingArguments: LimitSlicingArgument,
+                sizedFields: null,
+                requireOneSlicingArgument: false,
+                slicingArgumentDefaultValue: 100);
+
+        if (CanUseProjection(collectionField.ElementType))
+        {
+            field.UseProjection(collectionField.ElementType);
+        }
 
         field.Use(next => async context =>
         {
@@ -416,13 +436,14 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
 
     private static void ConfigureAggregateField(IObjectFieldDescriptor field, CollectionFieldModel collectionField, bool isFlat)
     {
-        field.Argument("where", argument => argument.Type(GraphQlTypeReferenceHelper.Parse(isFlat ? collectionField.FlatRowFilterInputName : collectionField.FilterInputName)))
-            .Argument("having", argument => argument.Type(GraphQlTypeReferenceHelper.Parse(isFlat ? collectionField.FlatAggregateHavingInputName : collectionField.AggregateHavingInputName)))
-            .Type(GraphQlTypeReferenceHelper.Parse(isFlat ? collectionField.FlatAggregateResultName : collectionField.AggregateResultName));
+        field.Argument("where", argument => argument.Type(GraphQlTypeReferenceHelper.Parse(isFlat ? collectionField.FlatRowFilterInputName : collectionField.FilterInputName)).Cost(8))
+            .Argument("having", argument => argument.Type(GraphQlTypeReferenceHelper.Parse(isFlat ? collectionField.FlatAggregateHavingInputName : collectionField.AggregateHavingInputName)).Cost(8))
+            .Type(GraphQlTypeReferenceHelper.Parse(isFlat ? collectionField.FlatAggregateResultName : collectionField.AggregateResultName))
+            .Cost(isFlat ? 24 : 12);
 
         if (isFlat)
         {
-            field.Argument("expand", argument => argument.Type(GraphQlTypeReferenceHelper.Parse("[String!]!")));
+            field.Argument("expand", argument => argument.Type(GraphQlTypeReferenceHelper.Parse("[String!]!")).Cost(15));
         }
 
         field.Use(next => async context =>
@@ -453,17 +474,24 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
 
     private static void ConfigureGroupField(IObjectFieldDescriptor field, CollectionFieldModel collectionField, bool isFlat)
     {
-        field.Argument("by", argument => argument.Type(GraphQlTypeReferenceHelper.Parse($"[{(isFlat ? collectionField.FlatGroupByEnumName : collectionField.GroupByEnumName)}!]")))
-            .Argument("where", argument => argument.Type(GraphQlTypeReferenceHelper.Parse(isFlat ? collectionField.FlatRowFilterInputName : collectionField.FilterInputName)))
-            .Argument("having", argument => argument.Type(GraphQlTypeReferenceHelper.Parse(isFlat ? collectionField.FlatGroupHavingInputName : collectionField.GroupHavingInputName)))
-            .Argument("order", argument => argument.Type(GraphQlTypeReferenceHelper.Parse($"[{(isFlat ? collectionField.FlatGroupOrderInputName : collectionField.GroupOrderInputName)}!]")))
-            .Argument("offset", argument => argument.Type<IntType>())
-            .Argument("limit", argument => argument.Type<IntType>())
-            .Type(GraphQlTypeReferenceHelper.Parse($"[{(isFlat ? collectionField.FlatGroupRowName : collectionField.GroupRowName)}!]"));
+        field.Argument("by", argument => argument.Type(GraphQlTypeReferenceHelper.Parse($"[{(isFlat ? collectionField.FlatGroupByEnumName : collectionField.GroupByEnumName)}!]")).Cost(10))
+            .Argument("where", argument => argument.Type(GraphQlTypeReferenceHelper.Parse(isFlat ? collectionField.FlatRowFilterInputName : collectionField.FilterInputName)).Cost(8))
+            .Argument("having", argument => argument.Type(GraphQlTypeReferenceHelper.Parse(isFlat ? collectionField.FlatGroupHavingInputName : collectionField.GroupHavingInputName)).Cost(8))
+            .Argument("order", argument => argument.Type(GraphQlTypeReferenceHelper.Parse($"[{(isFlat ? collectionField.FlatGroupOrderInputName : collectionField.GroupOrderInputName)}!]")).Cost(6))
+            .Argument("offset", argument => argument.Type<IntType>().Cost(2))
+            .Argument("limit", argument => argument.Type<IntType>().Cost(2))
+            .Type(GraphQlTypeReferenceHelper.Parse($"[{(isFlat ? collectionField.FlatGroupRowName : collectionField.GroupRowName)}!]"))
+            .Cost(isFlat ? 30 : 16)
+            .ListSize(
+                assumedSize: null,
+                slicingArguments: LimitSlicingArgument,
+                sizedFields: null,
+                requireOneSlicingArgument: false,
+                slicingArgumentDefaultValue: 100);
 
         if (isFlat)
         {
-            field.Argument("expand", argument => argument.Type(GraphQlTypeReferenceHelper.Parse("[String!]!")));
+            field.Argument("expand", argument => argument.Type(GraphQlTypeReferenceHelper.Parse("[String!]!")).Cost(15));
         }
 
         field.Use(next => async context =>
@@ -482,7 +510,7 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
                 ? ResolverArgumentReader.GetStringList(context, "expand")
                 : null;
 
-            context.Result = engine.CreateGroupRows(
+            context.Result = engine.CreateGroupRowsForField(
                 collectionField,
                 context.Result,
                 ResolverArgumentReader.GetOptionalArgument(context, "by"),
@@ -498,13 +526,20 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
 
     private static void ConfigureFlatField(IObjectFieldDescriptor field, CollectionFieldModel collectionField)
     {
-        field.Argument("expand", argument => argument.Type(GraphQlTypeReferenceHelper.Parse("[String!]!")))
-            .Argument("where", argument => argument.Type(GraphQlTypeReferenceHelper.Parse(collectionField.FlatRowFilterInputName)))
-            .Argument("order", argument => argument.Type(GraphQlTypeReferenceHelper.Parse($"[{collectionField.FlatRowSortInputName}!]")))
-            .Argument("offset", argument => argument.Type<IntType>())
-            .Argument("limit", argument => argument.Type<IntType>())
-            .Argument("maxDepth", argument => argument.Type<IntType>())
-            .Type(GraphQlTypeReferenceHelper.Parse($"[{collectionField.FlatRowName}!]"));
+        field.Argument("expand", argument => argument.Type(GraphQlTypeReferenceHelper.Parse("[String!]!")).Cost(15))
+            .Argument("where", argument => argument.Type(GraphQlTypeReferenceHelper.Parse(collectionField.FlatRowFilterInputName)).Cost(8))
+            .Argument("order", argument => argument.Type(GraphQlTypeReferenceHelper.Parse($"[{collectionField.FlatRowSortInputName}!]")).Cost(6))
+            .Argument("offset", argument => argument.Type<IntType>().Cost(2))
+            .Argument("limit", argument => argument.Type<IntType>().Cost(2))
+            .Argument("maxDepth", argument => argument.Type<IntType>().Cost(4))
+            .Type(GraphQlTypeReferenceHelper.Parse($"[{collectionField.FlatRowName}!]"))
+            .Cost(26)
+            .ListSize(
+                assumedSize: null,
+                slicingArguments: LimitSlicingArgument,
+                sizedFields: null,
+                requireOneSlicingArgument: false,
+                slicingArgumentDefaultValue: 100);
 
         field.Use(next => async context =>
         {
@@ -516,7 +551,7 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
             var engine = context.Service<CollectionExecutionEngine>();
             var expand = ResolverArgumentReader.GetStringList(context, "expand");
 
-            context.Result = engine.ApplyFlatArguments(
+            context.Result = engine.ApplyFlatArgumentsForField(
                 collectionField,
                 context.Result,
                 expand,
@@ -806,7 +841,7 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
         {
             AggregateSelectionContext selection => selection,
             GroupRowResult groupRow => groupRow.Selection,
-            _ => throw new InvalidOperationException("Unexpected aggregate parent context.")
+            _ => throw CollectionEnhancementGraphQlErrors.UnexpectedAggregateParentContext()
         };
 
     private static void ValidateFlatReferences(
@@ -816,6 +851,16 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
         bool includeByArgument = false)
     {
         var flatShape = FlatRowShapeCache.GetOrCreate(collectionField);
+        var invalidPaths = expand
+            .Where(path => flatShape.Paths.All(candidate => !string.Equals(candidate.Path, path, StringComparison.Ordinal)))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+
+        if (invalidPaths.Length > 0)
+        {
+            throw CollectionEnhancementGraphQlErrors.InvalidFlatExpandPath(collectionField, invalidPaths);
+        }
+
         var allowedGeneratedFields = flatShape.GeneratedFieldOwners
             .Where(kvp => expand.Contains(kvp.Value.Path, StringComparer.Ordinal))
             .Select(kvp => kvp.Key)
@@ -838,8 +883,7 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
 
         if (invalidFields.Length > 0)
         {
-            throw new InvalidOperationException(
-                $"The requested flat rowset does not include generated fields: {string.Join(", ", invalidFields)}.");
+            throw CollectionEnhancementGraphQlErrors.InvalidFlatFieldSelection(collectionField, invalidFields);
         }
     }
 
@@ -871,12 +915,12 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
 
         if (targetKind is not (ExportTargetKind.Flat or ExportTargetKind.FlatGroup))
         {
-            throw new InvalidOperationException("The @export directive is only supported on root flat or root flat-group fields.");
+            throw CollectionEnhancementGraphQlErrors.InvalidExportTarget(targetKind.ToString());
         }
 
         if (!string.Equals(context.Selection.DeclaringType.Name, "Query", StringComparison.Ordinal))
         {
-            throw new InvalidOperationException("The @export directive is only supported on root query fields.");
+            throw CollectionEnhancementGraphQlErrors.InvalidExportScope(context.Selection.DeclaringType.Name);
         }
 
         var rootFields = context.Operation.Definition.SelectionSet.Selections
@@ -885,13 +929,13 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
 
         if (rootFields.Length != 1)
         {
-            throw new InvalidOperationException("An export operation must select exactly one root field.");
+            throw CollectionEnhancementGraphQlErrors.InvalidExportRootSelectionCount(rootFields.Length);
         }
 
         var separator = ResolverArgumentReader.GetDirectiveArgument(directive, "separator")?.ToString() ?? ",";
         if (separator.Length != 1)
         {
-            throw new InvalidOperationException("The export separator must be a single character.");
+            throw CollectionEnhancementGraphQlErrors.InvalidExportSeparator(separator);
         }
 
         var duplicateHeaders = CollectLeafHeaders(context.Selection.SyntaxNode.SelectionSet)
@@ -902,8 +946,7 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
 
         if (duplicateHeaders.Length > 0)
         {
-            throw new InvalidOperationException(
-                $"The export selection produces duplicate headers: {string.Join(", ", duplicateHeaders)}.");
+            throw CollectionEnhancementGraphQlErrors.DuplicateExportHeaders(duplicateHeaders);
         }
     }
 
@@ -934,6 +977,9 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
             .SelectMany(item => InputValueNormalizer.AsDictionary(item)
                 .Select(pair => (pair.Key, string.Equals(pair.Value?.ToString(), "DESC", StringComparison.Ordinal))))
             .ToArray();
+
+    private static bool CanUseProjection(Type elementType) =>
+        elementType.GetConstructor(Type.EmptyTypes) is not null;
 
     private static IReadOnlyList<FlatScalarFieldDefinition> GetApplicableFields(
         IReadOnlyList<FlatScalarFieldDefinition> scalarFields,

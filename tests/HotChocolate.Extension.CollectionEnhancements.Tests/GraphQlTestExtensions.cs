@@ -23,4 +23,10 @@ internal static class GraphQlTestExtensions
     {
         Assert.True(result.Errors is { Count: > 0 }, result.ToJson());
     }
+
+    public static void AssertHasErrorCode(this IOperationResult result, string errorCode)
+    {
+        result.AssertHasErrors();
+        Assert.Contains(result.Errors!, error => string.Equals(error.Code, errorCode, StringComparison.Ordinal));
+    }
 }

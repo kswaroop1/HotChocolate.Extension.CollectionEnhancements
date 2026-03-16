@@ -251,7 +251,9 @@ public sealed class SchemaAndExecutionCoverageTests
         var nestedContext = ReflectionTestSupport.CreateResolverContext(nestedExportField, declaringTypeName: "Security");
         var rootQueryFailure = Assert.Throws<TargetInvocationException>(() =>
             ReflectionTestSupport.InvokeStatic(registrarType, "ValidateExportDirective", nestedContext, 1));
-        Assert.Contains("root query fields", rootQueryFailure.InnerException!.Message, StringComparison.Ordinal);
+        var rootQueryError = Assert.IsType<GraphQLException>(rootQueryFailure.InnerException);
+        Assert.Equal(CollectionEnhancementGraphQlErrors.ExportScopeInvalidCode, rootQueryError.Errors.Single().Code);
+        Assert.Contains("root query fields", rootQueryError.Errors.Single().Message, StringComparison.Ordinal);
 
         var duplicateHeaderField = GetFieldNode("""
             query {
@@ -264,7 +266,9 @@ public sealed class SchemaAndExecutionCoverageTests
         var duplicateHeaderContext = ReflectionTestSupport.CreateResolverContext(duplicateHeaderField);
         var duplicateFailure = Assert.Throws<TargetInvocationException>(() =>
             ReflectionTestSupport.InvokeStatic(registrarType, "ValidateExportDirective", duplicateHeaderContext, 1));
-        Assert.Contains("duplicate headers", duplicateFailure.InnerException!.Message, StringComparison.Ordinal);
+        var duplicateHeaderError = Assert.IsType<GraphQLException>(duplicateFailure.InnerException);
+        Assert.Equal(CollectionEnhancementGraphQlErrors.ExportDuplicateHeadersCode, duplicateHeaderError.Errors.Single().Code);
+        Assert.Contains("duplicate headers", duplicateHeaderError.Errors.Single().Message, StringComparison.Ordinal);
 
         var invalidSeparatorField = GetFieldNode("""
             query {
@@ -276,7 +280,9 @@ public sealed class SchemaAndExecutionCoverageTests
         var invalidSeparatorContext = ReflectionTestSupport.CreateResolverContext(invalidSeparatorField);
         var separatorFailure = Assert.Throws<TargetInvocationException>(() =>
             ReflectionTestSupport.InvokeStatic(registrarType, "ValidateExportDirective", invalidSeparatorContext, 1));
-        Assert.Contains("single character", separatorFailure.InnerException!.Message, StringComparison.Ordinal);
+        var separatorError = Assert.IsType<GraphQLException>(separatorFailure.InnerException);
+        Assert.Equal(CollectionEnhancementGraphQlErrors.ExportSeparatorInvalidCode, separatorError.Errors.Single().Code);
+        Assert.Contains("single character", separatorError.Errors.Single().Message, StringComparison.Ordinal);
 
         var defaultSeparatorField = GetFieldNode("""
             query {
@@ -291,7 +297,9 @@ public sealed class SchemaAndExecutionCoverageTests
         var unsupportedParentContext = ReflectionTestSupport.CreateResolverContext(GetFieldNode("""query { id }"""), parent: new object());
         var selectionFailure = Assert.Throws<TargetInvocationException>(() =>
             ReflectionTestSupport.InvokeStatic(registrarType, "GetSelection", unsupportedParentContext));
-        Assert.Contains("Unexpected aggregate parent context", selectionFailure.InnerException!.Message, StringComparison.Ordinal);
+        var selectionError = Assert.IsType<GraphQLException>(selectionFailure.InnerException);
+        Assert.Equal(CollectionEnhancementGraphQlErrors.UnexpectedAggregateParentContextCode, selectionError.Errors.Single().Code);
+        Assert.Contains("Unexpected aggregate parent context", selectionError.Errors.Single().Message, StringComparison.Ordinal);
 
         var services = new ServiceCollection()
             .AddSingleton(new DummyService("svc"))
@@ -347,6 +355,26 @@ public sealed class SchemaAndExecutionCoverageTests
             new[] { "details.coupons" },
             flatReferenceContext,
             true);
+
+        var invalidFlatReferenceField = GetFieldNode("""
+            query {
+              securitiesFlat(expand: ["details.coupons"]) {
+                callCallDate
+              }
+            }
+            """);
+        var invalidFlatReferenceContext = ReflectionTestSupport.CreateResolverContext(invalidFlatReferenceField);
+        var invalidFlatReferenceFailure = Assert.Throws<TargetInvocationException>(() =>
+            ReflectionTestSupport.InvokeStatic(
+                registrarType,
+                "ValidateFlatReferences",
+                GetCollectionField<Query>("securities"),
+                new[] { "details.coupons" },
+                invalidFlatReferenceContext,
+                false));
+        var invalidFlatReferenceError = Assert.IsType<GraphQLException>(invalidFlatReferenceFailure.InnerException);
+        Assert.Equal(CollectionEnhancementGraphQlErrors.FlatFieldSelectionInvalidCode, invalidFlatReferenceError.Errors.Single().Code);
+        Assert.Contains("does not include generated fields", invalidFlatReferenceError.Errors.Single().Message, StringComparison.Ordinal);
 
         Assert.Null(await ReflectionTestSupport.InvokeStaticAsync(registrarType, "UnwrapTaskLikeAsync", new object?[] { null }));
         var unwrappedTask = Assert.IsAssignableFrom<IReadOnlyList<int>>(await ReflectionTestSupport.InvokeStaticAsync(registrarType, "UnwrapTaskLikeAsync", Task.FromResult<IReadOnlyList<int>>([3])));
@@ -1159,6 +1187,61 @@ public sealed class SchemaAndExecutionCoverageTests
     }
 
     [Fact]
+    public void Registrar_ShouldEnableProjection_ForProjectionFriendlyCollectionTypes()
+    {
+        var registrarType = typeof(CollectionEnhancementTypeRegistrar);
+        var catalog = CollectionSchemaCatalog.CreateDefault();
+        var ownerModel = catalog.TryGetObjectType(typeof(ProjectionFriendlyOwner));
+        Assert.NotNull(ownerModel);
+        var rowsField = ownerModel.FindCollection("rows");
+        Assert.NotNull(rowsField);
+
+        var configured = false;
+        SchemaBuilder.New()
+            .AddProjections()
+            .AddType<HotChocolate.CostAnalysis.Types.CostDirectiveType>()
+            .AddType<HotChocolate.CostAnalysis.Types.ListSizeDirectiveType>()
+            .AddType<ProjectionFriendlyRow>()
+            .AddType(new InputObjectType(descriptor =>
+            {
+                descriptor.Name(rowsField.FilterInputName);
+                descriptor.Field("id").Type<IntType>();
+            }))
+            .AddType(new InputObjectType(descriptor =>
+            {
+                descriptor.Name(rowsField.SortInputName);
+                descriptor.Field("id").Type<IntType>();
+            }))
+            .AddQueryType(descriptor =>
+            {
+                descriptor.Name("Query");
+                var field = descriptor.Field("rows")
+                    .Type("[ProjectionFriendlyRow!]!")
+                    .Resolve(_ => Array.Empty<ProjectionFriendlyRow>());
+
+                ReflectionTestSupport.InvokeStatic(
+                    registrarType,
+                    "ConfigureCollectionField",
+                    field,
+                    rowsField);
+
+                configured = true;
+            })
+            .Create();
+
+        Assert.True(configured);
+
+        Assert.True((bool)ReflectionTestSupport.InvokeStatic(
+            registrarType,
+            "CanUseProjection",
+            typeof(ProjectionFriendlyRow))!);
+        Assert.False((bool)ReflectionTestSupport.InvokeStatic(
+            registrarType,
+            "CanUseProjection",
+            typeof(Security))!);
+    }
+
+    [Fact]
     public void ResolverArgumentReader_ShouldCoverLiteralVariableAndFallbackParsing()
     {
         var field = GetFieldNode("""
@@ -1302,6 +1385,21 @@ public sealed class SchemaAndExecutionCoverageTests
                 ObjectChild = new FlatCoverageChild([])
             }
         ];
+    }
+
+    public sealed class ProjectionFriendlyOwner
+    {
+        public ProjectionFriendlyRow[] Rows { get; } =
+        [
+            new() { Id = 1, Name = "Row" }
+        ];
+    }
+
+    public sealed class ProjectionFriendlyRow
+    {
+        public int Id { get; set; }
+
+        public string? Name { get; set; }
     }
 
     private sealed class UnreadableStream : MemoryStream

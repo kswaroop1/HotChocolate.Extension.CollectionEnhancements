@@ -1,4 +1,5 @@
 using System.Reflection;
+using HotChocolate.Extension.CollectionEnhancements.Generated;
 
 namespace HotChocolate.Extension.CollectionEnhancements.Metadata;
 
@@ -18,6 +19,7 @@ internal sealed class CollectionSchemaCatalog
     public static CollectionSchemaCatalog CreateDefault()
     {
         var catalog = new CollectionSchemaCatalog();
+        catalog.DiscoverFromGeneratedProviders();
         catalog.DiscoverFromLoadedAssemblies();
         return catalog;
     }
@@ -62,17 +64,186 @@ internal sealed class CollectionSchemaCatalog
         }
     }
 
-    private ObjectTypeModel GetOrCreateModel(Type clrType, bool isQueryRoot = false)
+    private void DiscoverFromGeneratedProviders()
+    {
+        var providers = AppDomain.CurrentDomain.GetAssemblies()
+            .Where(IsApplicationAssembly)
+            .SelectMany(SafeGetTypes)
+            .Where(type =>
+                typeof(ICollectionEnhancementGeneratedModelProvider).IsAssignableFrom(type)
+                && type is { IsAbstract: false, IsInterface: false })
+            .Select(TryCreateProvider)
+            .Where(provider => provider is not null)
+            .Cast<ICollectionEnhancementGeneratedModelProvider>()
+            .ToArray();
+
+        var generatedTypes = providers
+            .SelectMany(provider => provider.GetObjectTypes())
+            .DistinctBy(type => type.ClrType)
+            .ToArray();
+
+        foreach (var generatedType in generatedTypes)
+        {
+            GetOrCreateModel(generatedType.ClrType, generatedType.GraphQlTypeName, generatedType.IsQueryRoot);
+        }
+
+        foreach (var generatedType in generatedTypes)
+        {
+            TryPopulateGeneratedModel(generatedType);
+        }
+    }
+
+    private ObjectTypeModel GetOrCreateModel(Type clrType, bool isQueryRoot = false) =>
+        GetOrCreateModel(clrType, graphQlTypeName: null, isQueryRoot);
+
+    private ObjectTypeModel GetOrCreateModel(Type clrType, string? graphQlTypeName, bool isQueryRoot = false)
     {
         if (_models.TryGetValue(clrType, out var existing))
         {
             return existing;
         }
 
-        var graphQlTypeName = isQueryRoot ? "Query" : GraphQlNaming.GetTypeName(clrType);
-        var model = new ObjectTypeModel(clrType, graphQlTypeName, isQueryRoot);
+        var actualGraphQlTypeName = graphQlTypeName ?? (isQueryRoot ? "Query" : GraphQlNaming.GetTypeName(clrType));
+        var model = new ObjectTypeModel(clrType, actualGraphQlTypeName, isQueryRoot);
         _models.Add(clrType, model);
         return model;
+    }
+
+    private void TryPopulateGeneratedModel(CollectionEnhancementGeneratedObjectType generatedType)
+    {
+        if (!_models.TryGetValue(generatedType.ClrType, out var model) ||
+            model.ScalarFields.Count > 0 ||
+            model.ObjectFields.Count > 0 ||
+            model.CollectionFields.Count > 0)
+        {
+            return;
+        }
+
+        if (!TryResolveGeneratedScalarFields(generatedType.ClrType, generatedType.ScalarFields, out var scalarFields) ||
+            !TryResolveGeneratedObjectFields(generatedType.ClrType, generatedType.ObjectFields, out var objectFields) ||
+            !TryResolveGeneratedCollectionFields(generatedType, out var collectionFields))
+        {
+            return;
+        }
+
+        model.ScalarFields.AddRange(scalarFields);
+        model.ObjectFields.AddRange(objectFields);
+        model.CollectionFields.AddRange(collectionFields);
+
+        foreach (var objectField in objectFields)
+        {
+            GetOrCreateModel(objectField.ClrType);
+        }
+
+        foreach (var collectionField in collectionFields)
+        {
+            GetOrCreateModel(collectionField.ElementType);
+        }
+    }
+
+    private static bool TryResolveGeneratedScalarFields(
+        Type declaringType,
+        IReadOnlyList<CollectionEnhancementGeneratedScalarField> generatedFields,
+        out List<ScalarFieldModel> resolvedFields)
+    {
+        resolvedFields = [];
+
+        foreach (var generatedField in generatedFields)
+        {
+            if (!TryResolveMember(declaringType, generatedField.MemberName, generatedField.MemberKind, out var member))
+            {
+                resolvedFields.Clear();
+                return false;
+            }
+
+            resolvedFields.Add(new ScalarFieldModel(
+                member,
+                generatedField.GraphQlName,
+                generatedField.ClrType));
+        }
+
+        return true;
+    }
+
+    private static bool TryResolveGeneratedObjectFields(
+        Type declaringType,
+        IReadOnlyList<CollectionEnhancementGeneratedObjectField> generatedFields,
+        out List<ObjectReferenceFieldModel> resolvedFields)
+    {
+        resolvedFields = [];
+
+        foreach (var generatedField in generatedFields)
+        {
+            if (!TryResolveMember(declaringType, generatedField.MemberName, generatedField.MemberKind, out var member))
+            {
+                resolvedFields.Clear();
+                return false;
+            }
+
+            resolvedFields.Add(new ObjectReferenceFieldModel(
+                member,
+                generatedField.GraphQlName,
+                generatedField.ClrType));
+        }
+
+        return true;
+    }
+
+    private static bool TryResolveGeneratedCollectionFields(
+        CollectionEnhancementGeneratedObjectType generatedType,
+        out List<CollectionFieldModel> resolvedFields)
+    {
+        resolvedFields = [];
+
+        foreach (var generatedField in generatedType.CollectionFields)
+        {
+            if (!TryResolveMember(generatedType.ClrType, generatedField.MemberName, generatedField.MemberKind, out var member))
+            {
+                resolvedFields.Clear();
+                return false;
+            }
+
+            resolvedFields.Add(new CollectionFieldModel(
+                member,
+                generatedField.GraphQlName,
+                generatedField.ClrType,
+                generatedField.ElementType,
+                generatedField.HostTypeName,
+                generatedField.ElementTypeName,
+                generatedField.FlatRowClrType));
+        }
+
+        return true;
+    }
+
+    private static bool TryResolveMember(
+        Type declaringType,
+        string memberName,
+        CollectionEnhancementGeneratedMemberKind memberKind,
+        out MemberInfo member)
+    {
+        member = (memberKind switch
+        {
+            CollectionEnhancementGeneratedMemberKind.Property =>
+                declaringType.GetProperty(memberName, BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static),
+            CollectionEnhancementGeneratedMemberKind.Method =>
+                declaringType.GetMethod(memberName, BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static),
+            _ => null
+        })!;
+
+        return member is not null;
+    }
+
+    private static ICollectionEnhancementGeneratedModelProvider? TryCreateProvider(Type providerType)
+    {
+        try
+        {
+            return Activator.CreateInstance(providerType, nonPublic: true) as ICollectionEnhancementGeneratedModelProvider;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private void PopulateModel(ObjectTypeModel model)
@@ -146,7 +317,9 @@ internal sealed class CollectionSchemaCatalog
         };
 
     private static bool IsQueryType(Type type) =>
-        type is { IsClass: true, IsAbstract: false, Name: "Query" };
+        type is { IsClass: true, IsAbstract: false }
+        && (type.Name == "Query"
+            || type.GetCustomAttribute<CollectionEnhancementModelAttribute>()?.IsQueryRoot == true);
 
     private static bool IsApplicationAssembly(Assembly assembly)
     {

@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Linq.Expressions;
 using System.Reflection;
+using HotChocolate.Data;
 using HotChocolate.Extension.CollectionEnhancements.Metadata;
 
 namespace HotChocolate.Extension.CollectionEnhancements.Execution;
@@ -17,10 +18,12 @@ internal sealed partial class CollectionExecutionEngine
     {
         if (TryApplyQueryableCollectionArguments(collectionField, sourceValue, where, order, offset, limit, out var queryableResult))
         {
-            return queryableResult!;
+            return WrapAsExecutable(collectionField.ElementType, queryableResult!);
         }
 
-        return ApplyCollectionArguments(collectionField, sourceValue, where, order, offset, limit);
+        return WrapAsExecutable(
+            collectionField.ElementType,
+            ApplyCollectionArguments(collectionField, sourceValue, where, order, offset, limit));
     }
 
     internal bool TryApplyQueryableCollectionArguments(
@@ -950,6 +953,41 @@ internal sealed partial class CollectionExecutionEngine
         return current;
     }
 
+    private static object WrapAsExecutable(Type elementType, object source)
+    {
+        var wrapMethod = source is IQueryable
+            ? _wrapQueryableExecutableMethod
+            : _wrapEnumerableExecutableMethod;
+
+        return wrapMethod.MakeGenericMethod(elementType)
+            .Invoke(null, [ConvertToTypedSequence(elementType, source)])!;
+    }
+
+    private static object ConvertToTypedSequence(Type elementType, object source)
+    {
+        if (source is IQueryable queryable && queryable.ElementType == elementType)
+        {
+            return queryable;
+        }
+
+        if (source.GetType().IsArray && source.GetType().GetElementType() == elementType)
+        {
+            return source;
+        }
+
+        var values = source is System.Collections.IEnumerable enumerable
+            ? enumerable.Cast<object?>().ToArray()
+            : [source];
+
+        var typedArray = Array.CreateInstance(elementType, values.Length);
+        for (var index = 0; index < values.Length; index++)
+        {
+            typedArray.SetValue(values[index], index);
+        }
+
+        return typedArray;
+    }
+
     private bool TryCreateQueryableAggregateSelection(
         CollectionFieldModel collectionField,
         object? sourceValue,
@@ -1531,4 +1569,14 @@ internal sealed partial class CollectionExecutionEngine
     {
         public static UnsupportedAggregateValue Instance { get; } = new();
     }
+
+    private static readonly MethodInfo _wrapQueryableExecutableMethod = typeof(CollectionExecutionEngine)
+        .GetMethod(nameof(WrapQueryableExecutable), BindingFlags.Static | BindingFlags.NonPublic)!;
+
+    private static readonly MethodInfo _wrapEnumerableExecutableMethod = typeof(CollectionExecutionEngine)
+        .GetMethod(nameof(WrapEnumerableExecutable), BindingFlags.Static | BindingFlags.NonPublic)!;
+
+    private static object WrapQueryableExecutable<T>(IQueryable<T> source) => source.AsExecutable();
+
+    private static object WrapEnumerableExecutable<T>(IEnumerable<T> source) => source.AsExecutable();
 }

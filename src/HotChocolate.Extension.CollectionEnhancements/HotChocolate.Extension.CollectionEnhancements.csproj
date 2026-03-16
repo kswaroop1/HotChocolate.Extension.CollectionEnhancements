@@ -5,11 +5,47 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
+    <PackageId>HotChocolate.Extension.CollectionEnhancements</PackageId>
+    <Authors>kswaroop</Authors>
+    <Description>Hot Chocolate collection aggregate, group, flat-row, and export extensions.</Description>
+    <PackageTags>graphql;hotchocolate;aggregation;flattening;csv;source-generator</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageLicenseFile>LICENSE</PackageLicenseFile>
+    <RepositoryUrl>https://github.com/kswaroop1/HotChocolate.Extension.CollectionEnhancements</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="HotChocolate.AspNetCore" Version="15.*" />
+    <PackageReference Include="HotChocolate.CostAnalysis" Version="15.*" />
     <PackageReference Include="HotChocolate.Data" Version="15.*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\\HotChocolate.Extension.CollectionEnhancements.Generators\\HotChocolate.Extension.CollectionEnhancements.Generators.csproj"
+                      OutputItemType="Analyzer"
+                      ReferenceOutputAssembly="false"
+                      PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\\HotChocolate.Extension.CollectionEnhancements.Generators\\bin\\$(Configuration)\\netstandard2.0\\HotChocolate.Extension.CollectionEnhancements.Generators.dll"
+          Pack="true"
+          PackagePath="analyzers/dotnet/cs"
+          Visible="false" />
+    <None Include="..\\..\\README.md"
+          Pack="true"
+          PackagePath=""
+          Link="README.md"
+          Visible="false" />
+    <None Include="..\\..\\LICENSE"
+          Pack="true"
+          PackagePath=""
+          Link="LICENSE"
+          Visible="false" />
   </ItemGroup>
 
 </Project>

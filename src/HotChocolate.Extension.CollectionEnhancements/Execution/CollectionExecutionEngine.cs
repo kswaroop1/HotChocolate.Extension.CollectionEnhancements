@@ -44,6 +44,31 @@ internal sealed partial class CollectionExecutionEngine(CollectionSchemaCatalog 
         return PassesHaving(selection, having) ? selection : null;
     }
 
+    public object CreateGroupRowsForField(
+        CollectionFieldModel collectionField,
+        object? sourceValue,
+        object? by,
+        object? where,
+        object? having,
+        object? order,
+        int? offset,
+        int? limit,
+        bool isFlat,
+        IReadOnlyList<string>? expand) =>
+        WrapAsExecutable(
+            typeof(GroupRowResult),
+            CreateGroupRows(
+                collectionField,
+                sourceValue,
+                by,
+                where,
+                having,
+                order,
+                offset,
+                limit,
+                isFlat,
+                expand));
+
     public IReadOnlyList<GroupRowResult> CreateGroupRows(
         CollectionFieldModel collectionField,
         object? sourceValue,
@@ -112,6 +137,25 @@ internal sealed partial class CollectionExecutionEngine(CollectionSchemaCatalog 
         var ordered = ApplyFlatSort(filtered, order);
         return ApplyWindow(ordered, offset, limit);
     }
+
+    public object ApplyFlatArgumentsForField(
+        CollectionFieldModel collectionField,
+        object? sourceValue,
+        IReadOnlyList<string> expand,
+        object? where,
+        object? order,
+        int? offset,
+        int? limit) =>
+        WrapAsExecutable(
+            typeof(IReadOnlyDictionary<string, object?>),
+            ApplyFlatArguments(
+                collectionField,
+                sourceValue,
+                expand,
+                where,
+                order,
+                offset,
+                limit));
 
     public object? ResolveFieldValue(Type hostType, object row, string fieldName, bool isFlat)
     {

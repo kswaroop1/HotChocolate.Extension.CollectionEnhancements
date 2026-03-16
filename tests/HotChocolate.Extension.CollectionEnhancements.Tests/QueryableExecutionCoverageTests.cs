@@ -1,6 +1,8 @@
 #pragma warning disable CS8605
 using System.Linq.Expressions;
 using System.Reflection;
+using HotChocolate;
+using HotChocolate.Data;
 using HotChocolate.Extension.CollectionEnhancements.Execution;
 using HotChocolate.Extension.CollectionEnhancements.Metadata;
 using HotChocolate.Extension.CollectionEnhancements.Tests.TestData;
@@ -35,7 +37,8 @@ public sealed class QueryableExecutionCoverageTests
             offset: 1,
             limit: 1);
 
-        var queryable = Assert.IsAssignableFrom<IQueryable>(result);
+        Assert.IsAssignableFrom<IExecutable>(result);
+        var queryable = AsQueryable<Security>(result);
         var expressionText = queryable.Expression.ToString();
 
         Assert.Contains("Where", expressionText, StringComparison.Ordinal);
@@ -63,8 +66,19 @@ public sealed class QueryableExecutionCoverageTests
             offset: null,
             limit: null);
 
-        var aggregateFilteredQueryable = Assert.IsAssignableFrom<IQueryable>(fallbackResult);
+        Assert.IsAssignableFrom<IExecutable>(fallbackResult);
+        var aggregateFilteredQueryable = AsQueryable<Customer>(fallbackResult);
         Assert.Contains("Count", aggregateFilteredQueryable.Expression.ToString(), StringComparison.Ordinal);
+
+        var enumerableExecutable = Engine.ApplyCollectionArgumentsForField(
+            securitiesField,
+            ExampleData.Securities,
+            where: null,
+            order: null,
+            offset: null,
+            limit: 2);
+        Assert.IsAssignableFrom<IExecutable>(enumerableExecutable);
+        Assert.Equal([1, 2], AsQueryable<Security>(enumerableExecutable).Select(security => security.Id).ToArray());
 
         var nonQueryableApplied = Engine.TryApplyQueryableCollectionArguments(
             securitiesField,
@@ -731,6 +745,61 @@ public sealed class QueryableExecutionCoverageTests
             1,
             2));
         Assert.Equal([2, 3], windowed.Cast<Security>().Select(security => security.Id).ToArray());
+
+        var mismatchedQueryableSequence = ReflectionTestSupport.InvokeStatic(
+            typeof(CollectionExecutionEngine),
+            "ConvertToTypedSequence",
+            typeof(Customer),
+            Array.Empty<Security>().AsQueryable());
+        var mismatchedTypedArray = Assert.IsType<Customer[]>(mismatchedQueryableSequence);
+        Assert.Empty(mismatchedTypedArray);
+
+        var securityArray = ExampleData.Securities.ToArray();
+        var arraySequence = ReflectionTestSupport.InvokeStatic(
+            typeof(CollectionExecutionEngine),
+            "ConvertToTypedSequence",
+            typeof(Security),
+            securityArray);
+        Assert.Same(securityArray, arraySequence);
+
+        var singleValueSequence = ReflectionTestSupport.InvokeStatic(
+            typeof(CollectionExecutionEngine),
+            "ConvertToTypedSequence",
+            typeof(Security),
+            ExampleData.Securities[0]);
+        Assert.Equal([ExampleData.Securities[0].Id], ((Security[])singleValueSequence!).Select(security => security.Id).ToArray());
+
+        var singleExecutable = ReflectionTestSupport.InvokeStatic(
+            typeof(CollectionExecutionEngine),
+            "WrapAsExecutable",
+            typeof(Security),
+            ExampleData.Securities[0]);
+        Assert.IsAssignableFrom<IExecutable>(singleExecutable);
+
+        var groupedExecutable = Engine.CreateGroupRowsForField(
+            GetCollectionField<Query>("customers"),
+            ExampleData.Customers,
+            new object?[] { "name" },
+            where: null,
+            having: null,
+            order: null,
+            offset: null,
+            limit: null,
+            isFlat: false,
+            expand: null);
+        Assert.IsAssignableFrom<IExecutable>(groupedExecutable);
+        Assert.Equal(3, AsQueryable<GroupRowResult>(groupedExecutable).Count());
+
+        var flatExecutable = Engine.ApplyFlatArgumentsForField(
+            GetCollectionField<Query>("securities"),
+            ExampleData.Securities,
+            ["details.coupons"],
+            where: null,
+            order: null,
+            offset: null,
+            limit: 2);
+        Assert.IsAssignableFrom<IExecutable>(flatExecutable);
+        Assert.Equal(2, AsQueryable<IReadOnlyDictionary<string, object?>>(flatExecutable).Count());
     }
 
     private static bool EvaluatePredicate<T>(Expression expression, ParameterExpression parameter, T value)
@@ -738,6 +807,9 @@ public sealed class QueryableExecutionCoverageTests
         var lambda = Expression.Lambda<Func<T, bool>>(expression, (ParameterExpression)parameter);
         return lambda.Compile()(value);
     }
+
+    private static IQueryable<T> AsQueryable<T>(object executable) =>
+        DataEnumerableExtensions.AsQueryable((dynamic)executable);
 
     private static InvocationResult InvokeInstanceWithArguments(object instance, string methodName, params object?[] arguments)
     {

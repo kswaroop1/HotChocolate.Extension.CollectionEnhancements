@@ -25,7 +25,8 @@ internal sealed record CollectionFieldModel(
     Type ClrType,
     Type ElementType,
     string HostTypeName,
-    string ElementTypeName)
+    string ElementTypeName,
+    Type? GeneratedFlatRowClrType = null)
     : ObjectFieldModel(Member, GraphQlName, ClrType)
 {
     public string TypePrefix => $"{HostTypeName}{GraphQlNaming.ToPascalCase(GraphQlName)}";
@@ -81,4 +82,6 @@ internal sealed record CollectionFieldModel(
     public string FlatGroupOrderInputName => $"{TypePrefix}FlatGroupOrderInput";
 
     public string FlatGroupHavingInputName => $"{TypePrefix}FlatGroupHavingInput";
+
+    public bool HasGeneratedFlatRowClrType => GeneratedFlatRowClrType is not null;
 }

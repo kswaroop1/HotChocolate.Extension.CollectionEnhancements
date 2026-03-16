@@ -1,6 +1,7 @@
 using System.Collections;
 using System.Globalization;
 using System.Reflection;
+using System.Reflection.Emit;
 using HotChocolate.Extension.CollectionEnhancements.Execution;
 using HotChocolate.Extension.CollectionEnhancements.Metadata;
 using HotChocolate.Extension.CollectionEnhancements.Schema;
@@ -104,6 +105,7 @@ public sealed class MetadataUtilityCoverageTests
     public void GraphQlNaming_ShouldHandleMethodsPropertiesFieldsAndPluralization()
     {
         Assert.Equal("securities", GraphQlNaming.GetFieldName(typeof(Query).GetMethod(nameof(Query.GetSecurities))!));
+        Assert.Equal("method", GraphQlNaming.GetFieldName(typeof(DummyHost).GetMethod(nameof(DummyHost.Method))!));
         Assert.Equal("name", GraphQlNaming.GetFieldName(typeof(Customer).GetProperty(nameof(Customer.Name))!));
         Assert.Equal("field", GraphQlNaming.GetFieldName(typeof(DummyHost).GetField(nameof(DummyHost.Field))!));
         Assert.Equal(string.Empty, GraphQlNaming.ToCamelCase(string.Empty));
@@ -208,10 +210,74 @@ public sealed class MetadataUtilityCoverageTests
 
         Assert.True((bool)ReflectionTestSupport.InvokeStatic(typeof(CollectionSchemaCatalog), "IsApplicationAssembly", new NullNameAssembly())!);
 
+        Assert.Equal(
+            typeof(IQueryable<Security>),
+            ReflectionTestSupport.InvokeStatic(typeof(CollectionSchemaCatalog), "GetMemberType", typeof(Query).GetMethod(nameof(Query.GetSecurities))!));
+
         var eventInfo = typeof(DummyHost).GetEvent(nameof(DummyHost.Changed))!;
         var getMemberTypeFailure = Assert.Throws<TargetInvocationException>(() =>
             ReflectionTestSupport.InvokeStatic(typeof(CollectionSchemaCatalog), "GetMemberType", eventInfo));
         Assert.IsType<NotSupportedException>(getMemberTypeFailure.InnerException);
+    }
+
+    [Fact]
+    public void CollectionFieldModel_ShouldExposeGeneratedFlatRowFlag()
+    {
+        var defaultCollectionField = new CollectionFieldModel(
+            typeof(Query).GetMethod(nameof(Query.GetSecurities))!,
+            "securities",
+            typeof(IQueryable<Security>),
+            typeof(Security),
+            "Query",
+            nameof(Security));
+        Assert.False(defaultCollectionField.HasGeneratedFlatRowClrType);
+
+        var generatedCollectionField = new CollectionFieldModel(
+            typeof(Query).GetMethod(nameof(Query.GetSecurities))!,
+            "securities",
+            typeof(IQueryable<Security>),
+            typeof(Security),
+            "Query",
+            nameof(Security),
+            typeof(object));
+        Assert.True(generatedCollectionField.HasGeneratedFlatRowClrType);
+    }
+
+    [Fact]
+    public void CollectionSchemaCatalog_ShouldCoverGetOrCreatePopulateAndQueryTypeBranches()
+    {
+        var catalog = new CollectionSchemaCatalog();
+
+        var queryModel = Assert.IsType<ObjectTypeModel>(
+            ReflectionTestSupport.InvokeInstance(catalog, "GetOrCreateModel", typeof(Query), true)!);
+        Assert.Equal("Query", queryModel.GraphQlTypeName);
+        ReflectionTestSupport.InvokeInstance(catalog, "PopulateModel", queryModel);
+        Assert.NotNull(queryModel.FindCollection("securities"));
+
+        var objectModel = Assert.IsType<ObjectTypeModel>(
+            ReflectionTestSupport.InvokeInstance(catalog, "GetOrCreateModel", typeof(PopulateCoverageHost), false)!);
+        Assert.Equal(nameof(PopulateCoverageHost), objectModel.GraphQlTypeName);
+
+        ReflectionTestSupport.InvokeInstance(catalog, "PopulateModel", objectModel);
+        Assert.NotNull(objectModel.FindObject("child"));
+        Assert.Null(objectModel.FindObject("abstractReference"));
+        Assert.Null(objectModel.FindObject("objectReference"));
+
+        Assert.False((bool)ReflectionTestSupport.InvokeStatic(typeof(CollectionSchemaCatalog), "IsQueryType", typeof(int))!);
+        Assert.False((bool)ReflectionTestSupport.InvokeStatic(typeof(CollectionSchemaCatalog), "IsQueryType", typeof(AbstractCoverageType))!);
+
+        var assemblyBuilder = AssemblyBuilder.DefineDynamicAssembly(new AssemblyName("CollectionEnhancementCatalogCoverage"), AssemblyBuilderAccess.Run);
+        var moduleBuilder = assemblyBuilder.DefineDynamicModule("Main");
+        var typeBuilder = moduleBuilder.DefineType("AttributedDynamicQueryRoot", TypeAttributes.Public | TypeAttributes.Class);
+        var attributeBuilder = new CustomAttributeBuilder(
+            typeof(CollectionEnhancementModelAttribute).GetConstructor(Type.EmptyTypes)!,
+            [],
+            [typeof(CollectionEnhancementModelAttribute).GetProperty(nameof(CollectionEnhancementModelAttribute.IsQueryRoot))!],
+            [true]);
+        typeBuilder.SetCustomAttribute(attributeBuilder);
+        var attributedDynamicType = typeBuilder.CreateType();
+
+        Assert.True((bool)ReflectionTestSupport.InvokeStatic(typeof(CollectionSchemaCatalog), "IsQueryType", attributedDynamicType)!);
     }
 
     [Fact]
@@ -400,6 +466,17 @@ public sealed class MetadataUtilityCoverageTests
 
         public string Property { get; init; } = string.Empty;
     }
+
+    private sealed class PopulateCoverageHost
+    {
+        public PopulateCoverageChild Child { get; } = new("child");
+
+        public AbstractCoverageType? AbstractReference => null;
+
+        public object ObjectReference => new();
+    }
+
+    private sealed record PopulateCoverageChild(string Name);
 
     private sealed class NullKeyDictionary : IDictionary
     {

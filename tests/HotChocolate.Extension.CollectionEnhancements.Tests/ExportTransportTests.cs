@@ -6,6 +6,7 @@ using HotChocolate.Execution;
 using HotChocolate.Extension.CollectionEnhancements.Schema;
 using HotChocolate.Extension.CollectionEnhancements.Tests.TestServer;
 using HotChocolate.Language;
+using HotChocolate.Types;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -85,7 +86,7 @@ public sealed class ExportTransportTests
             count
           }
         }
-        """)]
+        """, CollectionEnhancementGraphQlErrors.ExportTargetInvalidCode)]
     [InlineData("""
         query {
           securitiesFlat(
@@ -97,27 +98,76 @@ public sealed class ExportTransportTests
             id
           }
         }
-        """)]
+        """, CollectionEnhancementGraphQlErrors.ExportRootSelectionInvalidCode)]
     [InlineData("""
         query {
           securitiesFlat(
             expand: ["details.coupons"]
           ) @export(format: CSV, separator: "||") {
             id
-            duplicate: isin
-            duplicate: couponPaymentDate
           }
         }
-        """)]
-    public async Task InvalidExportQueries_ShouldRemainJsonErrors_AndEmitNoCsv(string query)
+        """, CollectionEnhancementGraphQlErrors.ExportSeparatorInvalidCode)]
+    public async Task InvalidExportQueries_ShouldRemainJsonErrors_AndEmitNoCsv(string query, string errorCode)
     {
         var formatted = await FormatAsync(query);
 
-        Assert.True(formatted.Result.Errors is { Count: > 0 }, formatted.Result.ToJson());
+        formatted.Result.AssertHasErrorCode(errorCode);
         Assert.Contains("json", formatted.Context.Response.ContentType, StringComparison.OrdinalIgnoreCase);
         Assert.StartsWith("{", formatted.Body, StringComparison.Ordinal);
         Assert.Contains("\"errors\"", formatted.Body, StringComparison.Ordinal);
         Assert.DoesNotContain("text/csv", formatted.Context.Response.ContentType, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task InvalidFlatExpandQueries_ShouldReturnStableGraphQlErrors()
+    {
+        const string query = """
+            query {
+              securitiesFlat(
+                expand: ["details.missingCoupons"]
+              ) {
+                id
+              }
+            }
+            """;
+
+        var formatted = await FormatAsync(query);
+
+        formatted.Result.AssertHasErrorCode(CollectionEnhancementGraphQlErrors.FlatExpandPathInvalidCode);
+        Assert.Contains("json", formatted.Context.Response.ContentType, StringComparison.OrdinalIgnoreCase);
+        Assert.StartsWith("{", formatted.Body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GeneratedCollectionFields_ShouldExposeCostMetadata()
+    {
+        var executor = await TestServerFactory.CreateTestExecutorAsync();
+        var queryType = executor.Schema.GetType<ObjectType>("Query");
+
+        var securitiesFlat = queryType.Fields["securitiesFlat"];
+        Assert.Contains(securitiesFlat.Directives, directive => directive.Type.Name.Equals("cost", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(securitiesFlat.Directives, directive => directive.Type.Name.Equals("listSize", StringComparison.OrdinalIgnoreCase));
+
+        var securitiesFlatGroup = queryType.Fields["securitiesFlatGroup"];
+        Assert.Contains(securitiesFlatGroup.Directives, directive => directive.Type.Name.Equals("cost", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(securitiesFlatGroup.Directives, directive => directive.Type.Name.Equals("listSize", StringComparison.OrdinalIgnoreCase));
+
+        var expandArgument = securitiesFlat.Arguments["expand"];
+        Assert.Contains(expandArgument.Directives, directive => directive.Type.Name.Equals("cost", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task CollectionEnhancements_ShouldConfigureCostAnalyzer()
+    {
+        var executor = await TestServerFactory.CreateTestExecutorAsync();
+        var options = executor.GetCostOptions();
+
+        Assert.False(options.SkipAnalyzer);
+        Assert.False(options.EnforceCostLimits);
+        Assert.True(options.MaxFieldCost >= 500_000);
+        Assert.True(options.MaxTypeCost >= 500_000);
+        Assert.NotNull(options.FilterVariableMultiplier);
     }
 
     private static async Task<FormattedResponse> FormatAsync(string query)
