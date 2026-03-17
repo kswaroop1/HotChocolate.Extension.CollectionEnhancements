@@ -43,7 +43,7 @@ internal sealed class AggregateSelectionContext
         CollectionField = collectionField;
         IsFlat = isFlat;
         QueryableSource = queryable;
-        _rowsFactory = () => queryable.Cast<object>().ToArray();
+        _rowsFactory = () => ((System.Collections.IEnumerable)queryable).Cast<object>().ToArray();
     }
 
     public CollectionFieldModel CollectionField { get; }

@@ -10,11 +10,19 @@ namespace HotChocolate.Extension.CollectionEnhancements;
 
 public static class RequestExecutorBuilderExtensions
 {
-    public static IRequestExecutorBuilder AddCollectionEnhancements(this IRequestExecutorBuilder builder)
+    public static IRequestExecutorBuilder AddCollectionEnhancements(
+        this IRequestExecutorBuilder builder,
+        Action<CollectionEnhancementOptions>? configure = null)
     {
+        var options = new CollectionEnhancementOptions();
+        configure?.Invoke(options);
+
         var catalog = CollectionSchemaCatalog.CreateDefault();
         builder.Services.AddSingleton(catalog);
-        builder.Services.AddSingleton<CollectionExecutionEngine>();
+        builder.Services.AddSingleton(options);
+        builder.Services.AddSingleton(sp => new CollectionExecutionEngine(
+            sp.GetRequiredService<CollectionSchemaCatalog>(),
+            sp.GetRequiredService<CollectionEnhancementOptions>()));
         builder.AddCostAnalyzer()
             .ModifyCostOptions(options =>
             {

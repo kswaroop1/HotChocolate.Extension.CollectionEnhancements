@@ -2,9 +2,12 @@ using HotChocolate.Extension.CollectionEnhancements.Metadata;
 
 namespace HotChocolate.Extension.CollectionEnhancements.Execution;
 
-internal sealed partial class CollectionExecutionEngine(CollectionSchemaCatalog catalog)
+internal sealed partial class CollectionExecutionEngine(
+    CollectionSchemaCatalog catalog,
+    CollectionEnhancementOptions? options = null)
 {
     private readonly CollectionSchemaCatalog _catalog = catalog;
+    private readonly CollectionEnhancementOptions _options = options ?? new();
 
     public IReadOnlyList<object> ApplyCollectionArguments(
         CollectionFieldModel collectionField,
@@ -935,6 +938,10 @@ internal sealed partial class CollectionExecutionEngine(CollectionSchemaCatalog 
         {
             NumericAggregate.Sum => AggregateOperator.Sum,
             NumericAggregate.Average => AggregateOperator.Avg,
+            NumericAggregate.SampleStdev => AggregateOperator.Stdev,
+            NumericAggregate.PopulationStdev => AggregateOperator.Stdevp,
+            NumericAggregate.Skew => AggregateOperator.Skew,
+            NumericAggregate.Kurtosis => AggregateOperator.Kurtosis,
             _ => null
         };
 
@@ -944,17 +951,19 @@ internal sealed partial class CollectionExecutionEngine(CollectionSchemaCatalog 
             return queryableValue;
         }
 
-        var values = selection.Rows
-            .Select(row => selection.IsFlat
-                ? ((IReadOnlyDictionary<string, object?>)row).GetValueOrDefault(fieldName)
-                : ResolveFieldValue(selection.CollectionField.ElementType, row, fieldName, isFlat: false))
-            .Where(value => ComparisonHelper.TryConvertToDouble(value, out _))
-            .Select(value =>
-            {
-                ComparisonHelper.TryConvertToDouble(value, out var number);
-                return number;
-            })
-            .ToArray();
+        var values = TryGetQueryableProjectedNumericValues(selection, fieldName, out var projectedValues)
+            ? projectedValues
+            : selection.Rows
+                .Select(row => selection.IsFlat
+                    ? ((IReadOnlyDictionary<string, object?>)row).GetValueOrDefault(fieldName)
+                    : ResolveFieldValue(selection.CollectionField.ElementType, row, fieldName, isFlat: false))
+                .Where(value => ComparisonHelper.TryConvertToDouble(value, out _))
+                .Select(value =>
+                {
+                    ComparisonHelper.TryConvertToDouble(value, out var number);
+                    return number;
+                })
+                .ToArray();
 
         if (values.Length == 0)
         {
@@ -1173,25 +1182,46 @@ internal sealed partial class CollectionExecutionEngine(CollectionSchemaCatalog 
     {
         public static RunningMoments Calculate(IReadOnlyList<double> values)
         {
-            var count = values.Count;
-            if (count == 0)
+            if (values.Count == 0)
             {
                 return default;
             }
 
-            var mean = values.Average();
-            var centered = values.Select(value => value - mean).ToArray();
-            var m2Population = centered.Sum(value => value * value) / count;
-            var m3Population = centered.Sum(value => value * value * value) / count;
-            var m4Population = centered.Sum(value => value * value * value * value) / count;
+            double mean = 0d;
+            double m2 = 0d;
+            double m3 = 0d;
+            double m4 = 0d;
+            var count = 0;
 
-            var sampleStdev = count > 1
-                ? Math.Sqrt(centered.Sum(value => value * value) / (count - 1))
+            foreach (var value in values)
+            {
+                var previousCount = count;
+                count++;
+
+                var delta = value - mean;
+                var deltaN = delta / count;
+                var deltaN2 = deltaN * deltaN;
+                var term1 = delta * deltaN * previousCount;
+
+                mean += deltaN;
+                m4 += term1 * deltaN2 * ((count * count) - (3d * count) + 3d)
+                    + (6d * deltaN2 * m2)
+                    - (4d * deltaN * m3);
+                m3 += (term1 * deltaN * (count - 2d)) - (3d * deltaN * m2);
+                m2 += term1;
+            }
+
+            var variancePopulation = Math.Max(0d, m2 / count);
+            var sampleVariance = count > 1
+                ? Math.Max(0d, m2 / (count - 1d))
                 : 0d;
-
-            var populationStdev = Math.Sqrt(m2Population);
-            var skew = m2Population == 0d ? 0d : m3Population / Math.Pow(m2Population, 1.5d);
-            var kurtosis = m2Population == 0d ? 0d : m4Population / (m2Population * m2Population);
+            var populationStdev = Math.Sqrt(variancePopulation);
+            var sampleStdev = Math.Sqrt(sampleVariance);
+            var m2Population = variancePopulation;
+            var m3Population = m3 / count;
+            var m4Population = m4 / count;
+            var skew = m2Population <= 0d ? 0d : m3Population / Math.Pow(m2Population, 1.5d);
+            var kurtosis = m2Population <= 0d ? 0d : m4Population / (m2Population * m2Population);
             return new RunningMoments(sampleStdev, populationStdev, skew, kurtosis);
         }
     }

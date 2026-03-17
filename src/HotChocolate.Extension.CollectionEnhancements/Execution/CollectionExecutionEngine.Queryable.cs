@@ -3,6 +3,7 @@ using System.Linq.Expressions;
 using System.Reflection;
 using HotChocolate.Data;
 using HotChocolate.Extension.CollectionEnhancements.Metadata;
+using Microsoft.EntityFrameworkCore;
 
 namespace HotChocolate.Extension.CollectionEnhancements.Execution;
 
@@ -1088,6 +1089,18 @@ internal sealed partial class CollectionExecutionEngine
             AggregateOperator.Avg => ExecuteQueryableNumericAggregate(queryable, scalarField, nameof(Queryable.Average)),
             AggregateOperator.Min => ExecuteQueryableMinOrMax(queryable, scalarField, min: true),
             AggregateOperator.Max => ExecuteQueryableMinOrMax(queryable, scalarField, min: false),
+            AggregateOperator.Stdev => TryExecuteQueryableMomentAggregate(queryable, scalarField, aggregateOperator, out var sampleStdev)
+                ? sampleStdev
+                : UnsupportedAggregateValue.Instance,
+            AggregateOperator.Stdevp => TryExecuteQueryableMomentAggregate(queryable, scalarField, aggregateOperator, out var populationStdev)
+                ? populationStdev
+                : UnsupportedAggregateValue.Instance,
+            AggregateOperator.Skew => TryExecuteQueryableMomentAggregate(queryable, scalarField, aggregateOperator, out var skew)
+                ? skew
+                : UnsupportedAggregateValue.Instance,
+            AggregateOperator.Kurtosis => TryExecuteQueryableMomentAggregate(queryable, scalarField, aggregateOperator, out var kurtosis)
+                ? kurtosis
+                : UnsupportedAggregateValue.Instance,
             _ => UnsupportedAggregateValue.Instance
         };
 
@@ -1177,6 +1190,364 @@ internal sealed partial class CollectionExecutionEngine
         return result is null
             ? null
             : Convert.ToDouble(result, CultureInfo.InvariantCulture);
+    }
+
+    private bool TryExecuteQueryableMomentAggregate(
+        IQueryable queryable,
+        ScalarFieldModel scalarField,
+        AggregateOperator aggregateOperator,
+        out object? value)
+    {
+        value = null;
+
+        if (_options.StatisticalMomentsExecutionMode == StatisticalMomentsExecutionMode.Stable ||
+            !TypeInspection.IsNumeric(scalarField.ClrType) ||
+            !EfCoreProviderSupport.TryDetect(queryable, out var providerInfo) ||
+            !providerInfo.IsRelational)
+        {
+            return false;
+        }
+
+        if ((aggregateOperator is AggregateOperator.Stdev or AggregateOperator.Stdevp) &&
+            TryExecuteNativeStandardDeviation(queryable, scalarField, providerInfo, aggregateOperator == AggregateOperator.Stdevp, out value))
+        {
+            return true;
+        }
+
+        if (!TryCalculateQueryableMomentStatistics(queryable, scalarField, out var statistics))
+        {
+            return false;
+        }
+
+        value = aggregateOperator switch
+        {
+            AggregateOperator.Stdev => statistics.GetSampleStandardDeviation(),
+            AggregateOperator.Stdevp => statistics.GetPopulationStandardDeviation(),
+            AggregateOperator.Skew => statistics.GetSkewness(),
+            AggregateOperator.Kurtosis => statistics.GetKurtosis(),
+            _ => null
+        };
+        return true;
+    }
+
+    private bool TryExecuteNativeStandardDeviation(
+        IQueryable queryable,
+        ScalarFieldModel scalarField,
+        EfCoreProviderInfo providerInfo,
+        bool population,
+        out object? value)
+    {
+        value = null;
+
+        if (!TryGetNativeStandardDeviationMethod(providerInfo.Family, scalarField.ClrType, population, out var method, out var projectionType))
+        {
+            return false;
+        }
+
+        if (!TryCreateQueryableProjection(queryable, scalarField, projectionType, out var projected))
+        {
+            return false;
+        }
+
+        var count = ExecuteQueryableCount(projected);
+        if (count == 0)
+        {
+            value = null;
+            return true;
+        }
+
+        if (count == 1)
+        {
+            value = 0d;
+            return true;
+        }
+
+        try
+        {
+            var call = Expression.Call(
+                method,
+                Expression.Property(null, typeof(EF), nameof(EF.Functions)),
+                projected.Expression);
+            var result = projected.Provider.Execute(call);
+            value = result is null
+                ? null
+                : Convert.ToDouble(result, CultureInfo.InvariantCulture);
+            return true;
+        }
+        catch
+        {
+            value = null;
+            return false;
+        }
+    }
+
+    private static bool TryGetNativeStandardDeviationMethod(
+        EfCoreProviderFamily family,
+        Type clrType,
+        bool population,
+        out MethodInfo method,
+        out Type projectionType)
+    {
+        var candidateProjectionType = Nullable.GetUnderlyingType(clrType) ?? clrType;
+        projectionType = candidateProjectionType;
+        method = null!;
+
+        if (!IsNativeAggregateNumericType(candidateProjectionType))
+        {
+            return false;
+        }
+
+        var (typeName, assemblyName) = family switch
+        {
+            EfCoreProviderFamily.SqlServer => ("Microsoft.EntityFrameworkCore.SqlServerDbFunctionsExtensions", "Microsoft.EntityFrameworkCore.SqlServer"),
+            EfCoreProviderFamily.PostgreSql => ("Microsoft.EntityFrameworkCore.NpgsqlAggregateDbFunctionsExtensions", "Npgsql.EntityFrameworkCore.PostgreSQL"),
+            EfCoreProviderFamily.Oracle => ("Oracle.EntityFrameworkCore.Extensions.OracleDbFunctionsExtensions", "Oracle.EntityFrameworkCore"),
+            _ => default
+        };
+
+        if (string.IsNullOrWhiteSpace(typeName) || string.IsNullOrWhiteSpace(assemblyName))
+        {
+            return false;
+        }
+
+        var methodName = population ? "StandardDeviationPopulation" : "StandardDeviationSample";
+        var providerType = Type.GetType($"{typeName}, {assemblyName}", throwOnError: false);
+        if (providerType is null)
+        {
+            return false;
+        }
+
+        method = providerType
+            .GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .FirstOrDefault(candidate =>
+            {
+                if (!string.Equals(candidate.Name, methodName, StringComparison.Ordinal))
+                {
+                    return false;
+                }
+
+                var parameters = candidate.GetParameters();
+                if (parameters.Length != 2 || !parameters[1].ParameterType.IsGenericType)
+                {
+                    return false;
+                }
+
+                return parameters[1].ParameterType.GetGenericArguments()[0] == candidateProjectionType;
+            })!;
+        return method is not null;
+    }
+
+    private static bool IsNativeAggregateNumericType(Type type) =>
+        type == typeof(byte) ||
+        _nativeAggregateNumericTypes.Contains(type);
+
+    private static readonly HashSet<Type> _nativeAggregateNumericTypes =
+    [
+        typeof(short),
+        typeof(int),
+        typeof(long),
+        typeof(float),
+        typeof(double),
+        typeof(decimal)
+    ];
+
+    private bool TryCalculateQueryableMomentStatistics(
+        IQueryable queryable,
+        ScalarFieldModel scalarField,
+        out QueryableMomentStatistics statistics)
+    {
+        statistics = default;
+
+        if (!TryCreateQueryableProjection(queryable, scalarField, typeof(double), out var projected))
+        {
+            return false;
+        }
+
+        var values = projected.Cast<double>();
+
+        try
+        {
+            var count = values.Count();
+            if (count == 0)
+            {
+                statistics = new QueryableMomentStatistics(0, 0d, 0d, 0d, 0d);
+                return true;
+            }
+
+            var raw1 = values.Average();
+            var raw2 = values.Select(static value => value * value).Average();
+            var raw3 = values.Select(static value => value * value * value).Average();
+            var raw4 = values.Select(static value => value * value * value * value).Average();
+            statistics = new QueryableMomentStatistics(count, raw1, raw2, raw3, raw4);
+            return true;
+        }
+        catch
+        {
+            statistics = default;
+            return false;
+        }
+    }
+
+    private bool TryCreateQueryableProjection(
+        IQueryable queryable,
+        ScalarFieldModel scalarField,
+        Type projectionType,
+        out IQueryable projected)
+    {
+        projected = null!;
+
+        var parameter = Expression.Parameter(queryable.ElementType, "row");
+        var member = BuildMemberAccess(parameter, scalarField.Member);
+        var memberType = Nullable.GetUnderlyingType(member.Type) ?? member.Type;
+
+        if (!TypeInspection.IsNumeric(memberType))
+        {
+            return false;
+        }
+
+        try
+        {
+            Expression source = queryable.Expression;
+            if (CanBeNull(member.Type))
+            {
+                var notNull = Expression.Lambda(
+                    Expression.NotEqual(member, Expression.Constant(null, member.Type)),
+                    parameter);
+
+                source = Expression.Call(
+                    typeof(Queryable),
+                    nameof(Queryable.Where),
+                    [queryable.ElementType],
+                    source,
+                    Expression.Quote(notNull));
+            }
+
+            var selectorBody = projectionType == member.Type
+                ? member
+                : Expression.Convert(member, projectionType);
+
+            var selected = Expression.Call(
+                typeof(Queryable),
+                nameof(Queryable.Select),
+                [queryable.ElementType, projectionType],
+                source,
+                Expression.Quote(Expression.Lambda(selectorBody, parameter)));
+
+            projected = queryable.Provider.CreateQuery(selected);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private bool TryGetQueryableProjectedNumericValues(
+        AggregateSelectionContext selection,
+        string fieldName,
+        out double[] values)
+    {
+        values = [];
+
+        if (selection.IsFlat || selection.QueryableSource is not { } queryable)
+        {
+            return false;
+        }
+
+        if (_catalog.TryGetObjectType(selection.CollectionField.ElementType) is not { } model ||
+            model.FindScalar(fieldName) is not { } scalarField ||
+            !TryCreateQueryableProjection(queryable, scalarField, typeof(double), out var projected))
+        {
+            return false;
+        }
+
+        try
+        {
+            values = projected.Cast<double>().ToArray();
+            return true;
+        }
+        catch
+        {
+            values = [];
+            return false;
+        }
+    }
+
+    private readonly record struct QueryableMomentStatistics(
+        int Count,
+        double Raw1,
+        double Raw2,
+        double Raw3,
+        double Raw4)
+    {
+        public double? GetPopulationStandardDeviation()
+        {
+            if (Count == 0)
+            {
+                return null;
+            }
+
+            return Math.Sqrt(GetPopulationVariance());
+        }
+
+        public double? GetSampleStandardDeviation()
+        {
+            if (Count == 0)
+            {
+                return null;
+            }
+
+            if (Count == 1)
+            {
+                return 0d;
+            }
+
+            return Math.Sqrt(GetSampleVariance());
+        }
+
+        public double? GetSkewness()
+        {
+            if (Count == 0)
+            {
+                return null;
+            }
+
+            var central2 = GetCentralMoment2();
+            if (central2 <= 0d)
+            {
+                return 0d;
+            }
+
+            return GetCentralMoment3() / Math.Pow(central2, 1.5d);
+        }
+
+        public double? GetKurtosis()
+        {
+            if (Count == 0)
+            {
+                return null;
+            }
+
+            var central2 = GetCentralMoment2();
+            if (central2 <= 0d)
+            {
+                return 0d;
+            }
+
+            return GetCentralMoment4() / (central2 * central2);
+        }
+
+        private double GetPopulationVariance() => GetCentralMoment2();
+
+        private double GetSampleVariance() => Math.Max(0d, GetCentralMoment2() * Count / (Count - 1d));
+
+        private double GetCentralMoment2() => Math.Max(0d, Raw2 - (Raw1 * Raw1));
+
+        private double GetCentralMoment3() =>
+            Raw3 - (3d * Raw1 * Raw2) + (2d * Raw1 * Raw1 * Raw1);
+
+        private double GetCentralMoment4() =>
+            Raw4 - (4d * Raw1 * Raw3) + (6d * Raw1 * Raw1 * Raw2) - (3d * Raw1 * Raw1 * Raw1 * Raw1);
     }
 
     private object? ExecuteQueryableMinOrMax(IQueryable queryable, ScalarFieldModel scalarField, bool min)
