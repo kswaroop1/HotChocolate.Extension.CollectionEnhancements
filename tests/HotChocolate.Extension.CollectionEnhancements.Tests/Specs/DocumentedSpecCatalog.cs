@@ -34,6 +34,12 @@ public static class DocumentedSpecCatalog
                   averageOrderValue: avg {
                     total
                   }
+                  totalSalesVariance: var {
+                    total
+                  }
+                  totalSalesVariancePopulation: varp {
+                    total
+                  }
                   totalSalesStdev: stdev {
                     total
                   }
@@ -82,6 +88,12 @@ public static class DocumentedSpecCatalog
                   currency
                   isin
                 }
+                var {
+                  price
+                }
+                varp {
+                  price
+                }
                 min {
                   price
                   expirationDate
@@ -128,6 +140,7 @@ public static class DocumentedSpecCatalog
                   having: {
                     and: [
                       { count: { gte: 2 } }
+                      { varp: { total: { gte: 25 } } }
                       { stdev: { total: { lt: 50 } } }
                     ]
                   }
@@ -166,6 +179,12 @@ public static class DocumentedSpecCatalog
                   couponsAggregate {
                     couponCount: count
                     avg {
+                      interestRate
+                    }
+                    var {
+                      interestRate
+                    }
+                    varp {
                       interestRate
                     }
                     stdev {
@@ -411,6 +430,9 @@ public static class DocumentedSpecCatalog
             query {
               people {
                 ordersAggregate {
+                  var {
+                    reference
+                  }
                   stdev {
                     reference
                   }

@@ -34,7 +34,8 @@ Rules:
 - Query shape: `<field>Aggregate(where:)`
 - Fixtures: at least one collection with rows both inside and outside the
   `where` predicate
-- Minimum assertions: `count`, `avg`, `stdev`, and `stdevp` are computed only
+- Minimum assertions: `count`, `avg`, `var`, `varp`, `stdev`, and `stdevp` are
+  computed only
   over the filtered rows
 
 ### A03. Higher moments on numeric fields
@@ -62,7 +63,8 @@ Rules:
 - Fixtures: root security data with distinct `currency`, `isin`, `price`, and
   `expirationDate` values
 - Minimum assertions: selection-set-based operator projection works across
-  multiple members and preserves the documented query shape
+  multiple members and preserves the documented query shape, including `var`,
+  `varp`, 'stdev' and 'stdevp', 'skew', 'kurtosis' for numeric members
 
 ### A06. Grouped aggregation
 
@@ -76,7 +78,8 @@ Rules:
 
 - Sources: `AGGREGATION_USAGE_EXAMPLES.md`
 - Query shape: grouped `having` with boolean composition
-- Fixtures: groups that both pass and fail `count` and `stdev` predicates
+- Fixtures: groups that both pass and fail `count`, `min`, `max`, `avg`, `var`, `stdev` etc aggregate
+  predicates
 - Minimum assertions: `having` is applied post-aggregation and boolean
   composition behaves correctly
 
@@ -235,8 +238,8 @@ Rules:
 ### N01. Invalid numeric aggregate usage
 
 - Sources: `AGGREGATION_PRD.md`
-- Query shape: applying `stdev`, `stdevp`, `skew`, or `kurtosis` to a
-  non-numeric field
+- Query shape: applying `var`, `varp`, `stdev`, `stdevp`, `skew`, or
+  `kurtosis` to a non-numeric field
 - Minimum assertions: the request is rejected before execution
 
 ### N02. Invalid flat expand path traversal

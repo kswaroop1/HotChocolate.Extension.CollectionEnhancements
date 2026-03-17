@@ -43,3 +43,54 @@ Run the suite with coverage using the repo-level settings file:
 ```powershell
 dotnet test tests\HotChocolate.Extension.CollectionEnhancements.Tests\HotChocolate.Extension.CollectionEnhancements.Tests.csproj --settings coverage.runsettings --collect:"XPlat Code Coverage"
 ```
+
+## Packaging
+
+Recommended publish shape:
+
+- `HotChocolate.Extension.CollectionEnhancements.<version>.nupkg`
+  - `lib/net10.0/HotChocolate.Extension.CollectionEnhancements.dll`
+  - `analyzers/dotnet/cs/HotChocolate.Extension.CollectionEnhancements.Generators.dll`
+  - `README.md`
+  - `LICENSE`
+- `HotChocolate.Extension.CollectionEnhancements.<version>.snupkg`
+  - symbols/source package for debugging the runtime and generator
+
+The runtime package is the only package consumers should need. It carries the
+runtime extension assembly plus the Roslyn generator as an analyzer payload, so
+`PackageReference` gives both build-time generated metadata/types and runtime
+`.AddCollectionEnhancements()` support.
+
+For local source consumption:
+
+```xml
+<ItemGroup>
+  <ProjectReference Include="..\src\HotChocolate.Extension.CollectionEnhancements\HotChocolate.Extension.CollectionEnhancements.csproj" />
+  <ProjectReference Include="..\src\HotChocolate.Extension.CollectionEnhancements.Generators\HotChocolate.Extension.CollectionEnhancements.Generators.csproj"
+                    OutputItemType="Analyzer"
+                    ReferenceOutputAssembly="false"
+                    PrivateAssets="all" />
+</ItemGroup>
+```
+
+## Runtime Options
+
+`AddCollectionEnhancements()` now accepts an optional configuration delegate:
+
+```csharp
+builder.Services
+    .AddGraphQLServer()
+    .AddCollectionEnhancements(options =>
+    {
+        options.StatisticalMomentsExecutionMode = StatisticalMomentsExecutionMode.Stable;
+    });
+```
+
+Statistical moment execution defaults to `Fast`:
+
+- SQL Server and PostgreSQL use provider-native variance and stddev functions when possible
+- Oracle, SQLite, and other relational EF Core providers use relational SQL-compatible raw-moment aggregation
+- stable mode and unsupported providers project only the required numeric scalar through `IQueryable` before applying C# iteration
+- full row materialization is reserved for the final fallback when query projection/composition is unavailable
+
+Set `StatisticalMomentsExecutionMode` to `Stable` to force the slower Welford-style in-memory path for `var`, `varp`, `stdev`, `stdevp`, `skew`, and `kurtosis`.

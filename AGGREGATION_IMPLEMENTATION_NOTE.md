@@ -51,6 +51,8 @@ Projection operators should follow the GraphQL selection model:
 
 - `sum { total }`
 - `avg { total }`
+- `var { total }`
+- `varp { total }`
 - `countDistinct { reference }`
 - `stringAgg(separator: ", ") { reference }`
 

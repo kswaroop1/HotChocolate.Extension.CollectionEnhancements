@@ -51,6 +51,12 @@ query {
       averageOrderValue: avg {
         total
       }
+      totalSalesVariance: var {
+        total
+      }
+      totalSalesVariancePopulation: varp {
+        total
+      }
       totalSalesStdev: stdev {
         total
       }
@@ -108,6 +114,12 @@ query {
       currency
       isin
     }
+    var {
+      price
+    }
+    varp {
+      price
+    }
     min {
       price
       expirationDate
@@ -142,6 +154,9 @@ query {
       avg {
         total
       }
+      var {
+        total
+      }
       stdev {
         total
       }
@@ -160,6 +175,7 @@ query {
       having: {
         and: [
           { count: { gte: 2 } }
+          { varp: { total: { gte: 25 } } }
           { stdev: { total: { lt: 50 } } }
         ]
       }
@@ -204,6 +220,12 @@ query {
       couponsAggregate {
         couponCount: count
         avg {
+          interestRate
+        }
+        var {
+          interestRate
+        }
+        varp {
           interestRate
         }
         stdev {
@@ -315,6 +337,9 @@ query {
 query {
   people {
     ordersAggregate {
+      var {
+        reference
+      }
       stdev {
         reference
       }
@@ -327,8 +352,8 @@ Expected behavior:
 
 - the request is rejected before aggregate execution begins
 - this is a request-shape failure, not a data result
-- the message text is non-normative; the important rule is that `stdev` is
-  numeric-only
+- the message text is non-normative; the important rule is that `var`,
+  `varp`, and `stdev` are numeric-only
 
 ## Invalid String Aggregate Usage
 

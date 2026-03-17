@@ -30,6 +30,8 @@ Canonical aggregate operators:
 - `countDistinct`
 - `sum`
 - `avg`
+- `var`
+- `varp`
 - `min`
 - `max`
 - `stdev`
@@ -295,6 +297,12 @@ query {
       couponsAggregate(where: { interestRate: { gt: 0.05 } }) {
         couponCount: count
         avg {
+          interestRate
+        }
+        var {
+          interestRate
+        }
+        varp {
           interestRate
         }
         stdev {

@@ -84,6 +84,12 @@ query {
       averageOrderValue: avg {
         total
       }
+      totalSalesVariance: var {
+        total
+      }
+      totalSalesVariancePopulation: varp {
+        total
+      }
       totalSalesStdev: stdev {
         total
       }
@@ -242,6 +248,8 @@ query {
 
 ### Numeric-Only Operators
 
+- `var`: sample variance
+- `varp`: population variance
 - `stdev`: sample standard deviation
 - `stdevp`: population standard deviation
 - `skew`: skewness
@@ -249,7 +257,7 @@ query {
 
 Rules:
 
-- `stdev`, `stdevp`, `skew`, and `kurtosis` are only valid for numeric fields
+- `var`, `varp`, `stdev`, `stdevp`, `skew`, and `kurtosis` are only valid for numeric fields
 - `skew` and `kurtosis` are included because a one-pass implementation is
   possible using running moments
 - if a provider cannot translate `skew` or `kurtosis`, the in-memory fallback
@@ -288,6 +296,8 @@ type OrdersAggregateResult {
   countDistinct: OrdersCountDistinctResult!
   sum: OrdersSumResult!
   avg: OrdersAvgResult!
+  var: OrdersVarResult!
+  varp: OrdersVarpResult!
   min: OrdersMinResult!
   max: OrdersMaxResult!
   stdev: OrdersStdevResult!
@@ -304,6 +314,8 @@ type OrdersGroupRow {
   countDistinct: OrdersCountDistinctResult!
   sum: OrdersSumResult!
   avg: OrdersAvgResult!
+  var: OrdersVarResult!
+  varp: OrdersVarpResult!
   min: OrdersMinResult!
   max: OrdersMaxResult!
   stdev: OrdersStdevResult!
@@ -322,7 +334,7 @@ Operator result-type rules:
   and returns `Int!` per projected member field.
 - `sum` exposes numeric members only and preserves the normal HotChocolate
   scalar mapping of the underlying member type.
-- `avg`, `stdev`, `stdevp`, `skew`, and `kurtosis` expose numeric members only
+- `avg`, `var`, `varp`, `stdev`, `stdevp`, `skew`, and `kurtosis` expose numeric members only
   and return the operator's numeric scalar result for each projected member.
 - `min` and `max` expose comparable scalar, enum, date, and time members using
   the normal scalar mapping of the underlying member type.
@@ -344,6 +356,8 @@ Canonical rules:
 - `countDistinct` returns `0` per projected member field
 - `sum` returns `null`
 - `avg` returns `null`
+- `var` returns `null`
+- `varp` returns `null`
 - `min` returns `null`
 - `max` returns `null`
 - `stdev` returns `null`
@@ -360,6 +374,8 @@ These are data semantics, not errors.
 The canonical operator surface keeps GraphQL's normal field-selection model:
 
 - `avg { total }`
+- `var { total }`
+- `varp { total }`
 - `countDistinct { reference }`
 - `stringAgg(separator: ", ") { reference }`
 
@@ -382,6 +398,12 @@ query {
     countDistinct {
       currency
       isin
+    }
+    var {
+      price
+    }
+    varp {
+      price
     }
     min {
       price
@@ -465,7 +487,7 @@ Canonical input-shape rules:
 - `count` uses the normal integer operation filter input.
 - `countDistinct` uses nested integer operation filters keyed by projected
   member name.
-- `sum`, `avg`, `min`, `max`, `stdev`, `stdevp`, `skew`, and `kurtosis` use
+- `sum`, `avg`, `var`, `varp`, `min`, `max`, `stdev`, `stdevp`, `skew`, and `kurtosis` use
   nested operation filters keyed by the projected member name exposed on the
   corresponding operator result type.
 - `stringAgg` and `stringAggDistinct` use string operation filters keyed by the
@@ -477,6 +499,7 @@ Example:
 having: {
   and: [
     { count: { gte: 5 } }
+    { varp: { total: { gte: 25 } } }
     { stdev: { total: { lt: 50 } } }
     { kurtosis: { total: { lt: 10 } } }
   ]
@@ -497,6 +520,7 @@ Example:
 order: [
   { key: { status: ASC } }
   { count: DESC }
+  { varp: { total: DESC } }
   { stdev: { total: DESC } }
 ]
 ```
@@ -506,7 +530,7 @@ Canonical grouped-order rules:
 - `OrdersGroupOrderInput` mirrors `OrdersGroupRow`.
 - `key` uses a nested order input over the selected group key fields.
 - `count` uses `SortEnumType`.
-- `countDistinct`, `sum`, `avg`, `min`, `max`, `stdev`, `stdevp`, `skew`,
+- `countDistinct`, `sum`, `avg`, `var`, `varp`, `min`, `max`, `stdev`, `stdevp`, `skew`,
   `kurtosis`, `stringAgg`, and `stringAggDistinct` use nested order inputs keyed
   by the projected member names on the corresponding operator result type.
 
@@ -520,12 +544,12 @@ Aggregation must define not only what is valid, but when invalid requests fail.
 
 Canonical rules:
 
-- Applying `stdev`, `stdevp`, `skew`, or `kurtosis` to a non-numeric projected
+- Applying `var`, `varp`, `stdev`, `stdevp`, `skew`, or `kurtosis` to a non-numeric projected
   member is invalid.
 - Applying `stringAgg` or `stringAggDistinct` to a non-string projected member
   is invalid.
-- Referencing a non-projectable member in `countDistinct`, `sum`, `avg`, `min`,
-  `max`, `stdev`, `stdevp`, `skew`, `kurtosis`, `stringAgg`, or
+- Referencing a non-projectable member in `countDistinct`, `sum`, `avg`, `var`,
+  `varp`, `min`, `max`, `stdev`, `stdevp`, `skew`, `kurtosis`, `stringAgg`, or
   `stringAggDistinct` is invalid.
 - Referencing invalid fields inside aggregate `having`, group `having`, or group
   `order` is invalid.
@@ -548,14 +572,14 @@ before aggregate work begins.
 - provider-backed execution should prefer one aggregate or grouped projection per
   field
 - in-memory fallback must not do one pass per operator
-- `stdev`, `stdevp`, `skew`, and `kurtosis` must preserve one-pass execution in
+- `var`, `varp`, `stdev`, `stdevp`, `skew`, and `kurtosis` must preserve one-pass execution in
   fallback mode
 
 ## Success Criteria
 
 - the language reads naturally to GraphQL users
 - SQL users can infer `where`, `by`, `having`, and grouped ordering semantics
-- `countDistinct`, `stringAgg`, `stdev`, and `stdevp` are first-class features
+- `countDistinct`, `stringAgg`, `var`, `varp`, `stdev`, and `stdevp` are first-class features
 - `skew` and `kurtosis` are supported as long as the implementation remains
   single-pass
 - all documented examples can be turned into integration tests over the shared
