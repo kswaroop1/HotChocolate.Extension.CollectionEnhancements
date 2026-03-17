@@ -430,6 +430,95 @@ public sealed class SourceGeneratorCoverageTests
         var localRoot = fallbackAttributeCompilation.GetTypeByMetadataName("LocalRoot");
         Assert.NotNull(localRoot);
         Assert.False(Assert.IsType<bool>(InvokePrivate(ModelDiscoveryType, "IsQueryRoot", localRoot, fallbackAttributeSymbol)));
+
+        var nestedCompilation = CreateCompilation(
+            """
+            using System;
+            using HotChocolate.Extension.CollectionEnhancements;
+
+            [CollectionEnhancementModel]
+            public sealed class AnnotatedRoot
+            {
+                public sealed class NestedLevelOne
+                {
+                    public sealed class NestedLevelTwo { }
+                }
+
+                public void Unsupported([Obsolete] int value) { }
+            }
+
+            public sealed class PlainRoot;
+            """);
+        var annotatedRoot = nestedCompilation.GetTypeByMetadataName("AnnotatedRoot");
+        var plainRoot = nestedCompilation.GetTypeByMetadataName("PlainRoot");
+        Assert.NotNull(annotatedRoot);
+        Assert.NotNull(plainRoot);
+
+        var nestedTypes = Assert.IsAssignableFrom<IEnumerable<INamedTypeSymbol>>(InvokePrivate(ModelDiscoveryType, "EnumerateNestedTypes", annotatedRoot)!)
+            .ToArray();
+        Assert.Contains(nestedTypes, type => type.Name == "NestedLevelOne");
+        Assert.Contains(nestedTypes, type => type.Name == "NestedLevelTwo");
+
+        var enumeratedTypes = Assert.IsAssignableFrom<IEnumerable<INamedTypeSymbol>>(InvokePrivate(
+                ModelDiscoveryType,
+                "EnumerateTypes",
+                nestedCompilation.Assembly.GlobalNamespace)!)
+            .ToArray();
+        Assert.Contains(enumeratedTypes, type => type.Name == "AnnotatedRoot");
+        Assert.Contains(enumeratedTypes, type => type.Name == "PlainRoot");
+
+        var nestedLeaf = annotatedRoot.GetTypeMembers().Single().GetTypeMembers().Single();
+        var nestedLeafChildren = Assert.IsAssignableFrom<IEnumerable<INamedTypeSymbol>>(InvokePrivate(ModelDiscoveryType, "EnumerateNestedTypes", nestedLeaf)!);
+        Assert.Empty(nestedLeafChildren);
+
+        Assert.NotNull(InvokePrivate(ModelDiscoveryType, "GetCollectionEnhancementAttribute", annotatedRoot, null));
+        Assert.Null(InvokePrivate(ModelDiscoveryType, "GetCollectionEnhancementAttribute", plainRoot, null));
+        Assert.Null(InvokePrivate(
+            ModelDiscoveryType,
+            "GetCollectionEnhancementAttribute",
+            annotatedRoot,
+            nestedCompilation.GetTypeByMetadataName("System.ObsoleteAttribute")));
+
+        var unresolvedAttributeCompilation = CreateCompilation(
+            """
+            [Missing]
+            public sealed class MissingAttributeTarget
+            {
+            }
+            """);
+        var unresolvedTarget = unresolvedAttributeCompilation.GetTypeByMetadataName("MissingAttributeTarget");
+        Assert.NotNull(unresolvedTarget);
+        Assert.Null(InvokePrivate(ModelDiscoveryType, "GetCollectionEnhancementAttribute", unresolvedTarget, null));
+
+        var unsupportedParameter = annotatedRoot.GetMembers()
+            .OfType<IMethodSymbol>()
+            .Single(member => member.Name == "Unsupported")
+            .Parameters.Single();
+        Assert.False((bool)InvokePrivate(ModelDiscoveryType, "IsSupportedQueryParameter", unsupportedParameter)!);
+
+        var supportedParameter = sharedRoot.GetMembers()
+            .OfType<IMethodSymbol>()
+            .Single(member => member.Name == "GetRows")
+            .Parameters.Single();
+        Assert.True((bool)InvokePrivate(ModelDiscoveryType, "IsSupportedQueryParameter", supportedParameter)!);
+
+        var parentParameterCompilation = CreateCompilation(
+            """
+            using System;
+
+            public sealed class ParentAttribute : Attribute { }
+
+            public sealed class ParentQuery
+            {
+                public int Resolve([Parent] int value) => value;
+            }
+            """);
+        var parentParameter = parentParameterCompilation.GetTypeByMetadataName("ParentQuery")!
+            .GetMembers()
+            .OfType<IMethodSymbol>()
+            .Single(member => member.Name == "Resolve")
+            .Parameters.Single();
+        Assert.True((bool)InvokePrivate(ModelDiscoveryType, "IsSupportedQueryParameter", parentParameter)!);
     }
 
     private static CSharpCompilation CreateCompilation(string source)

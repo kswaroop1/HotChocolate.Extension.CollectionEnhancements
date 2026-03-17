@@ -45,6 +45,67 @@ public sealed class EfCoreProviderMomentCoverageTests
     }
 
     [Fact]
+    public void ProviderContracts_ShouldCoverRecordAndNativeSignatureHelpers()
+    {
+        var info = new EfCoreProviderInfo(
+            IsEfCore: true,
+            IsRelational: true,
+            Family: EfCoreProviderFamily.SqlServer,
+            ProviderName: "Microsoft.EntityFrameworkCore.SqlServer");
+
+        Assert.True(info.IsEfCore);
+        Assert.True(info.IsRelational);
+        Assert.Equal(EfCoreProviderFamily.SqlServer, info.Family);
+        Assert.Equal("Microsoft.EntityFrameworkCore.SqlServer", info.ProviderName);
+
+        Assert.False(Assert.IsType<bool>(ReflectionTestSupport.InvokeStatic(
+            typeof(CollectionExecutionEngine),
+            "HasMatchingProviderAggregateMethodSignature",
+            typeof(FakeProviderAggregateExtensions).GetMethod(nameof(FakeProviderAggregateExtensions.Unrelated), BindingFlags.Public | BindingFlags.Static)!,
+            "VarianceSample",
+            typeof(decimal))));
+
+        var overloads = typeof(FakeProviderAggregateExtensions)
+            .GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Where(method => method.Name == nameof(FakeProviderAggregateExtensions.VarianceSample))
+            .ToArray();
+
+        Assert.False(Assert.IsType<bool>(ReflectionTestSupport.InvokeStatic(
+            typeof(CollectionExecutionEngine),
+            "HasMatchingProviderAggregateMethodSignature",
+            overloads.Single(method => method.GetParameters().Length == 1),
+            "VarianceSample",
+            typeof(decimal))));
+
+        Assert.False(Assert.IsType<bool>(ReflectionTestSupport.InvokeStatic(
+            typeof(CollectionExecutionEngine),
+            "HasMatchingProviderAggregateMethodSignature",
+            overloads.Single(method =>
+                method.GetParameters().Length == 2 &&
+                method.GetParameters()[1].ParameterType == typeof(int)),
+            "VarianceSample",
+            typeof(decimal))));
+
+        Assert.False(Assert.IsType<bool>(ReflectionTestSupport.InvokeStatic(
+            typeof(CollectionExecutionEngine),
+            "HasMatchingProviderAggregateMethodSignature",
+            overloads.Single(method =>
+                method.GetParameters().Length == 2 &&
+                method.GetParameters()[1].ParameterType == typeof(IQueryable<int>)),
+            "VarianceSample",
+            typeof(decimal))));
+
+        Assert.True(Assert.IsType<bool>(ReflectionTestSupport.InvokeStatic(
+            typeof(CollectionExecutionEngine),
+            "HasMatchingProviderAggregateMethodSignature",
+            overloads.Single(method =>
+                method.GetParameters().Length == 2 &&
+                method.GetParameters()[1].ParameterType == typeof(IQueryable<decimal>)),
+            "VarianceSample",
+            typeof(decimal))));
+    }
+
+    [Fact]
     public void EfCoreProviderSupport_ShouldDetectKnownProviderFamilies()
     {
         Assert.True(EfCoreProviderSupport.TryDetect(CreateProviderQueryable("Microsoft.EntityFrameworkCore.SqlServer", relational: true), out var sqlServerInfo));
@@ -953,6 +1014,19 @@ public sealed class EfCoreProviderMomentCoverageTests
         public string? Version => "9.0.0";
 
         public bool IsConfigured(Microsoft.EntityFrameworkCore.Infrastructure.IDbContextOptions options) => true;
+    }
+
+    private static class FakeProviderAggregateExtensions
+    {
+        public static double Unrelated(object _, IQueryable<decimal> values) => values.Count();
+
+        public static double VarianceSample(object _) => 0d;
+
+        public static double VarianceSample(object _, int value) => value;
+
+        public static double VarianceSample(object _, IQueryable<int> values) => values.Count();
+
+        public static double VarianceSample(object _, IQueryable<decimal> values) => values.Count();
     }
 
     private sealed class ServiceBackedQueryable<T>(

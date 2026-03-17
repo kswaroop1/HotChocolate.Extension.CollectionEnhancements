@@ -182,6 +182,60 @@ public sealed class GeneratedProviderCoverageTests
         Assert.False((bool)isQueryType.Invoke(null, [typeof(GeneratedProviderCoverageHost)])!);
     }
 
+    [Fact]
+    public void GeneratedModelContracts_ShouldExposeRecordValues()
+    {
+        var scalar = new CollectionEnhancementGeneratedScalarField(
+            nameof(GeneratedProviderCoverageHost.Id),
+            CollectionEnhancementGeneratedMemberKind.Property,
+            "id",
+            typeof(int));
+        var child = new CollectionEnhancementGeneratedObjectField(
+            nameof(GeneratedProviderCoverageHost.Child),
+            CollectionEnhancementGeneratedMemberKind.Property,
+            "child",
+            typeof(GeneratedProviderCoverageChild));
+        var flatPath = new CollectionEnhancementGeneratedFlatPath(
+            "items",
+            "item",
+            typeof(GeneratedProviderCoverageLeaf),
+            nameof(GeneratedProviderCoverageLeaf),
+            [nameof(GeneratedProviderCoverageHost.GetItems)]);
+        var collection = new CollectionEnhancementGeneratedCollectionField(
+            nameof(GeneratedProviderCoverageHost.GetItems),
+            CollectionEnhancementGeneratedMemberKind.Method,
+            "items",
+            typeof(IReadOnlyList<GeneratedProviderCoverageLeaf>),
+            typeof(GeneratedProviderCoverageLeaf),
+            nameof(GeneratedProviderCoverageHost),
+            nameof(GeneratedProviderCoverageLeaf),
+            typeof(GeneratedProviderCoverageFlatRow),
+            [flatPath]);
+        var generatedType = new CollectionEnhancementGeneratedObjectType(
+            typeof(GeneratedProviderCoverageHost),
+            nameof(GeneratedProviderCoverageHost),
+            false,
+            [scalar],
+            [child],
+            [collection]);
+
+        Assert.Equal("id", scalar.GraphQlName);
+        Assert.Equal("child", child.GraphQlName);
+        Assert.Equal("items", flatPath.Path);
+        Assert.Equal("item", flatPath.Prefix);
+        Assert.Equal(typeof(GeneratedProviderCoverageLeaf), flatPath.TerminalElementType);
+        Assert.Equal(nameof(GeneratedProviderCoverageLeaf), flatPath.TerminalTypeName);
+        Assert.Equal([nameof(GeneratedProviderCoverageHost.GetItems)], flatPath.SegmentMemberNames);
+        Assert.Equal(typeof(GeneratedProviderCoverageFlatRow), collection.FlatRowClrType);
+        Assert.Equal(nameof(GeneratedProviderCoverageHost), collection.HostTypeName);
+        Assert.Equal(nameof(GeneratedProviderCoverageLeaf), collection.ElementTypeName);
+        Assert.Equal(typeof(GeneratedProviderCoverageHost), generatedType.ClrType);
+        Assert.False(generatedType.IsQueryRoot);
+        Assert.Same(scalar, generatedType.ScalarFields.Single());
+        Assert.Same(child, generatedType.ObjectFields.Single());
+        Assert.Same(collection, generatedType.CollectionFields.Single());
+    }
+
     private static void AssertInvalidResolution(string methodName, Type declaringType, object generatedFields)
     {
         var method = typeof(CollectionSchemaCatalog).GetMethod(

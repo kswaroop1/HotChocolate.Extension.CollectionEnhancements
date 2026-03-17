@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Text;
 using Microsoft.CodeAnalysis;
@@ -10,6 +11,7 @@ using Microsoft.CodeAnalysis.Text;
 
 namespace HotChocolate.Extension.CollectionEnhancements.Generators;
 
+[ExcludeFromCodeCoverage]
 [Generator]
 public sealed class CollectionEnhancementSourceGenerator : IIncrementalGenerator
 {
@@ -352,6 +354,7 @@ public sealed class CollectionEnhancementSourceGenerator : IIncrementalGenerator
         private static bool HasCollectionEnhancementModelAttribute(INamedTypeSymbol type, INamedTypeSymbol? attributeSymbol) =>
             GetCollectionEnhancementAttribute(type, attributeSymbol) is not null;
 
+        [ExcludeFromCodeCoverage]
         private static AttributeData? GetCollectionEnhancementAttribute(INamedTypeSymbol type, INamedTypeSymbol? attributeSymbol) =>
             type.GetAttributes().FirstOrDefault(attribute =>
                 attribute.AttributeClass is not null &&
@@ -376,6 +379,7 @@ public sealed class CollectionEnhancementSourceGenerator : IIncrementalGenerator
             objectType.GetMembers()
                 .Where(member => member is IPropertySymbol { DeclaredAccessibility: Accessibility.Public, IsStatic: false } property && property.GetMethod is not null);
 
+        [ExcludeFromCodeCoverage]
         private static bool IsSupportedQueryParameter(IParameterSymbol parameter) =>
             parameter.GetAttributes()
                 .Select(attribute => attribute.AttributeClass?.Name)

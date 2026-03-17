@@ -1377,21 +1377,7 @@ internal sealed partial class CollectionExecutionEngine
 
         var methodName = population ? "StandardDeviationPopulation" : "StandardDeviationSample";
         method = GetProviderAggregateExtensionMethods(assemblyName, simpleTypeName)
-            .FirstOrDefault(candidate =>
-            {
-                if (!string.Equals(candidate.Name, methodName, StringComparison.Ordinal))
-                {
-                    return false;
-                }
-
-                var parameters = candidate.GetParameters();
-                if (parameters.Length != 2 || !parameters[1].ParameterType.IsGenericType)
-                {
-                    return false;
-                }
-
-                return parameters[1].ParameterType.GetGenericArguments()[0] == candidateProjectionType;
-            })!;
+            .FirstOrDefault(candidate => HasMatchingProviderAggregateMethodSignature(candidate, methodName, candidateProjectionType))!;
         return method is not null;
     }
 
@@ -1426,22 +1412,33 @@ internal sealed partial class CollectionExecutionEngine
 
         var methodName = population ? "VariancePopulation" : "VarianceSample";
         method = GetProviderAggregateExtensionMethods(assemblyName, simpleTypeName)
-            .FirstOrDefault(candidate =>
-            {
-                if (!string.Equals(candidate.Name, methodName, StringComparison.Ordinal))
-                {
-                    return false;
-                }
-
-                var parameters = candidate.GetParameters();
-                if (parameters.Length != 2 || !parameters[1].ParameterType.IsGenericType)
-                {
-                    return false;
-                }
-
-                return parameters[1].ParameterType.GetGenericArguments()[0] == candidateProjectionType;
-            })!;
+            .FirstOrDefault(candidate => HasMatchingProviderAggregateMethodSignature(candidate, methodName, candidateProjectionType))!;
         return method is not null;
+    }
+
+    private static bool HasMatchingProviderAggregateMethodSignature(
+        MethodInfo candidate,
+        string methodName,
+        Type candidateProjectionType)
+    {
+        if (!string.Equals(candidate.Name, methodName, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var parameters = candidate.GetParameters();
+        if (parameters.Length != 2)
+        {
+            return false;
+        }
+
+        var selectorType = parameters[1].ParameterType;
+        if (!selectorType.IsGenericType)
+        {
+            return false;
+        }
+
+        return selectorType.GetGenericArguments()[0] == candidateProjectionType;
     }
 
     private static Type? GetProviderAggregateExtensionsType(string assemblyName, string simpleTypeName)
