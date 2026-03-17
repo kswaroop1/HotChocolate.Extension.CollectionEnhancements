@@ -226,6 +226,8 @@ internal sealed partial class CollectionExecutionEngine(
             AggregateOperator.CountDistinct => GetDistinctCount(projection.Selection, fieldName),
             AggregateOperator.Sum => GetNumericAggregate(projection.Selection, fieldName, NumericAggregate.Sum),
             AggregateOperator.Avg => GetNumericAggregate(projection.Selection, fieldName, NumericAggregate.Average),
+            AggregateOperator.Var => GetNumericAggregate(projection.Selection, fieldName, NumericAggregate.SampleVariance),
+            AggregateOperator.Varp => GetNumericAggregate(projection.Selection, fieldName, NumericAggregate.PopulationVariance),
             AggregateOperator.Min => GetMinOrMax(projection.Selection, fieldName, min: true),
             AggregateOperator.Max => GetMinOrMax(projection.Selection, fieldName, min: false),
             AggregateOperator.Stdev => GetNumericAggregate(projection.Selection, fieldName, NumericAggregate.SampleStdev),
@@ -938,6 +940,8 @@ internal sealed partial class CollectionExecutionEngine(
         {
             NumericAggregate.Sum => AggregateOperator.Sum,
             NumericAggregate.Average => AggregateOperator.Avg,
+            NumericAggregate.SampleVariance => AggregateOperator.Var,
+            NumericAggregate.PopulationVariance => AggregateOperator.Varp,
             NumericAggregate.SampleStdev => AggregateOperator.Stdev,
             NumericAggregate.PopulationStdev => AggregateOperator.Stdevp,
             NumericAggregate.Skew => AggregateOperator.Skew,
@@ -974,6 +978,8 @@ internal sealed partial class CollectionExecutionEngine(
         {
             NumericAggregate.Sum => values.Sum(),
             NumericAggregate.Average => values.Average(),
+            NumericAggregate.SampleVariance => RunningMoments.Calculate(values).SampleVariance,
+            NumericAggregate.PopulationVariance => RunningMoments.Calculate(values).PopulationVariance,
             NumericAggregate.SampleStdev => RunningMoments.Calculate(values).SampleStandardDeviation,
             NumericAggregate.PopulationStdev => RunningMoments.Calculate(values).PopulationStandardDeviation,
             NumericAggregate.Skew => RunningMoments.Calculate(values).Skewness,
@@ -1096,6 +1102,8 @@ internal sealed partial class CollectionExecutionEngine(
             "countDistinct" => AggregateOperator.CountDistinct,
             "sum" => AggregateOperator.Sum,
             "avg" => AggregateOperator.Avg,
+            "var" => AggregateOperator.Var,
+            "varp" => AggregateOperator.Varp,
             "min" => AggregateOperator.Min,
             "max" => AggregateOperator.Max,
             "stdev" => AggregateOperator.Stdev,
@@ -1111,6 +1119,8 @@ internal sealed partial class CollectionExecutionEngine(
     {
         Sum,
         Average,
+        SampleVariance,
+        PopulationVariance,
         SampleStdev,
         PopulationStdev,
         Skew,
@@ -1175,6 +1185,8 @@ internal sealed partial class CollectionExecutionEngine(
     }
 
     private readonly record struct RunningMoments(
+        double SampleVariance,
+        double PopulationVariance,
         double SampleStandardDeviation,
         double PopulationStandardDeviation,
         double Skewness,
@@ -1222,7 +1234,7 @@ internal sealed partial class CollectionExecutionEngine(
             var m4Population = m4 / count;
             var skew = m2Population <= 0d ? 0d : m3Population / Math.Pow(m2Population, 1.5d);
             var kurtosis = m2Population <= 0d ? 0d : m4Population / (m2Population * m2Population);
-            return new RunningMoments(sampleStdev, populationStdev, skew, kurtosis);
+            return new RunningMoments(sampleVariance, variancePopulation, sampleStdev, populationStdev, skew, kurtosis);
         }
     }
 

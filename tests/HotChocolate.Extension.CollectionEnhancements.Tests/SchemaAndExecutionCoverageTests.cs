@@ -706,12 +706,16 @@ public sealed class SchemaAndExecutionCoverageTests
         Assert.Equal(5, ReflectionTestSupport.InvokeStatic(typeof(CollectionExecutionEngine), "ConvertToNullableInt", 5));
         Assert.Equal(7, ReflectionTestSupport.InvokeStatic(typeof(CollectionExecutionEngine), "ConvertToNullableInt", 7L));
         Assert.Null(ReflectionTestSupport.InvokeStatic(typeof(CollectionExecutionEngine), "ConvertToNullableInt", new object?[] { null }));
+        Assert.Equal(AggregateOperator.Var, ReflectionTestSupport.InvokeStatic(typeof(CollectionExecutionEngine), "ParseOperator", "var"));
+        Assert.Equal(AggregateOperator.Varp, ReflectionTestSupport.InvokeStatic(typeof(CollectionExecutionEngine), "ParseOperator", "varp"));
         Assert.Equal(AggregateOperator.StringAggDistinct, ReflectionTestSupport.InvokeStatic(typeof(CollectionExecutionEngine), "ParseOperator", "stringAggDistinct"));
         var invalidOperator = Assert.Throws<TargetInvocationException>(() => ReflectionTestSupport.InvokeStatic(typeof(CollectionExecutionEngine), "ParseOperator", "bogus"));
         Assert.Contains("Unsupported aggregate operator", invalidOperator.InnerException!.Message, StringComparison.Ordinal);
 
         var momentsType = typeof(CollectionExecutionEngine).GetNestedType("RunningMoments", BindingFlags.NonPublic)!;
         var defaultMoments = ReflectionTestSupport.InvokeStatic(momentsType, "Calculate", Array.Empty<double>());
+        Assert.Equal(0d, (double)momentsType.GetProperty("SampleVariance")!.GetValue(defaultMoments)!);
+        Assert.Equal(0d, (double)momentsType.GetProperty("PopulationVariance")!.GetValue(defaultMoments)!);
         Assert.Equal(0d, (double)momentsType.GetProperty("SampleStandardDeviation")!.GetValue(defaultMoments)!);
         var zeroVarianceMoments = ReflectionTestSupport.InvokeStatic(momentsType, "Calculate", new double[] { 5, 5, 5 });
         Assert.Equal(0d, (double)momentsType.GetProperty("Skewness")!.GetValue(zeroVarianceMoments)!);
@@ -1079,7 +1083,7 @@ public sealed class SchemaAndExecutionCoverageTests
             }));
         Assert.Empty(groupClauses);
 
-        foreach (var name in new[] { "countDistinct", "sum", "avg", "min", "max", "stdev", "stdevp", "skew", "kurtosis", "stringAgg" })
+        foreach (var name in new[] { "countDistinct", "sum", "avg", "var", "varp", "min", "max", "stdev", "stdevp", "skew", "kurtosis", "stringAgg" })
         {
             Assert.NotNull(ReflectionTestSupport.InvokeStatic(typeof(CollectionExecutionEngine), "ParseOperator", name));
         }

@@ -126,6 +126,20 @@ public sealed class QueryableAggregateGroupCoverageTests
                 new AggregateProjection(selection, AggregateOperator.Avg, null, null),
                 "total"));
         Assert.Equal(
+            38_333.333333333336d,
+            Convert.ToDouble(
+                Engine.ResolveAggregateProjectionField(
+                    new AggregateProjection(selection, AggregateOperator.Var, null, null),
+                    "total")),
+            12);
+        Assert.Equal(
+            28_750d,
+            Convert.ToDouble(
+                Engine.ResolveAggregateProjectionField(
+                    new AggregateProjection(selection, AggregateOperator.Varp, null, null),
+                    "total")),
+            12);
+        Assert.Equal(
             3,
             Engine.ResolveAggregateProjectionField(
                 new AggregateProjection(selection, AggregateOperator.CountDistinct, null, null),
@@ -1143,6 +1157,36 @@ public sealed class QueryableAggregateGroupCoverageTests
             null);
         Assert.True((bool)avgAggregateValue.ReturnValue!);
 
+        var varAggregateValue = InvokeInstanceWithArguments(
+            Engine,
+            "TryBuildQueryableAggregateValueExpression",
+            ordersField,
+            enumerableOrders,
+            "total",
+            AggregateOperator.Var,
+            null);
+        Assert.True((bool)varAggregateValue.ReturnValue!);
+
+        var varpAggregateValue = InvokeInstanceWithArguments(
+            Engine,
+            "TryBuildQueryableAggregateValueExpression",
+            ordersField,
+            enumerableOrders,
+            "total",
+            AggregateOperator.Varp,
+            null);
+        Assert.True((bool)varpAggregateValue.ReturnValue!);
+
+        var nullableVarpAggregateValue = InvokeInstanceWithArguments(
+            Engine,
+            "TryBuildQueryableAggregateValueExpression",
+            couponsField,
+            Expression.Constant(ExampleData.Securities[2].Details.Coupons),
+            "interestRate",
+            AggregateOperator.Varp,
+            null);
+        Assert.True((bool)nullableVarpAggregateValue.ReturnValue!);
+
         var nonNumericAggregateValue = InvokeInstanceWithArguments(
             Engine,
             "TryBuildQueryableAggregateValueExpression",
@@ -1152,6 +1196,16 @@ public sealed class QueryableAggregateGroupCoverageTests
             AggregateOperator.Sum,
             null);
         Assert.False((bool)nonNumericAggregateValue.ReturnValue!);
+
+        var nonNumericVarianceAggregateValue = InvokeInstanceWithArguments(
+            Engine,
+            "TryBuildQueryableAggregateValueExpression",
+            ordersField,
+            enumerableOrders,
+            "reference",
+            AggregateOperator.Var,
+            null);
+        Assert.False((bool)nonNumericVarianceAggregateValue.ReturnValue!);
 
         var minAggregateValue = InvokeInstanceWithArguments(
             Engine,
@@ -1193,7 +1247,7 @@ public sealed class QueryableAggregateGroupCoverageTests
             null);
         Assert.False((bool)unsupportedAggregateValue.ReturnValue!);
 
-        foreach (var supportedOperator in new[] { "countDistinct", "sum", "avg", "min", "max" })
+        foreach (var supportedOperator in new[] { "countDistinct", "sum", "avg", "var", "varp", "min", "max" })
         {
             var parsedOperator = InvokeStaticWithArguments(
                 typeof(CollectionExecutionEngine),

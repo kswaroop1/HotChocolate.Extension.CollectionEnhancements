@@ -7,6 +7,8 @@ internal enum AggregateOperator
     CountDistinct,
     Sum,
     Avg,
+    Var,
+    Varp,
     Min,
     Max,
     Stdev,

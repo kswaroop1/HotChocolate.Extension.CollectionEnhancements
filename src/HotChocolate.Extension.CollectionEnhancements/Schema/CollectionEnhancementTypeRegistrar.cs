@@ -597,6 +597,8 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
 
         ConfigureProjectionField(descriptor, "sum", collectionField, scalarFields, isFlat, AggregateOperator.Sum);
         ConfigureProjectionField(descriptor, "avg", collectionField, scalarFields, isFlat, AggregateOperator.Avg);
+        ConfigureProjectionField(descriptor, "var", collectionField, scalarFields, isFlat, AggregateOperator.Var);
+        ConfigureProjectionField(descriptor, "varp", collectionField, scalarFields, isFlat, AggregateOperator.Varp);
         ConfigureProjectionField(descriptor, "min", collectionField, scalarFields, isFlat, AggregateOperator.Min);
         ConfigureProjectionField(descriptor, "max", collectionField, scalarFields, isFlat, AggregateOperator.Max);
         ConfigureProjectionField(descriptor, "stdev", collectionField, scalarFields, isFlat, AggregateOperator.Stdev);
@@ -640,6 +642,8 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
         RegisterOperatorResultType(builder, collectionField, isFlat, scalarFields, AggregateOperator.CountDistinct);
         RegisterOperatorResultType(builder, collectionField, isFlat, scalarFields, AggregateOperator.Sum);
         RegisterOperatorResultType(builder, collectionField, isFlat, scalarFields, AggregateOperator.Avg);
+        RegisterOperatorResultType(builder, collectionField, isFlat, scalarFields, AggregateOperator.Var);
+        RegisterOperatorResultType(builder, collectionField, isFlat, scalarFields, AggregateOperator.Varp);
         RegisterOperatorResultType(builder, collectionField, isFlat, scalarFields, AggregateOperator.Min);
         RegisterOperatorResultType(builder, collectionField, isFlat, scalarFields, AggregateOperator.Max);
         RegisterOperatorResultType(builder, collectionField, isFlat, scalarFields, AggregateOperator.Stdev);
@@ -667,6 +671,8 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
         ConfigureOperatorInputField(descriptor, collectionField, scalarFields, isFlat, AggregateOperator.CountDistinct, "HavingInput", "countDistinct");
         ConfigureOperatorInputField(descriptor, collectionField, scalarFields, isFlat, AggregateOperator.Sum, "HavingInput", "sum");
         ConfigureOperatorInputField(descriptor, collectionField, scalarFields, isFlat, AggregateOperator.Avg, "HavingInput", "avg");
+        ConfigureOperatorInputField(descriptor, collectionField, scalarFields, isFlat, AggregateOperator.Var, "HavingInput", "var");
+        ConfigureOperatorInputField(descriptor, collectionField, scalarFields, isFlat, AggregateOperator.Varp, "HavingInput", "varp");
         ConfigureOperatorInputField(descriptor, collectionField, scalarFields, isFlat, AggregateOperator.Min, "HavingInput", "min");
         ConfigureOperatorInputField(descriptor, collectionField, scalarFields, isFlat, AggregateOperator.Max, "HavingInput", "max");
         ConfigureOperatorInputField(descriptor, collectionField, scalarFields, isFlat, AggregateOperator.Stdev, "HavingInput", "stdev");
@@ -686,6 +692,8 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
         ConfigureOperatorInputField(descriptor, collectionField, scalarFields, isFlat, AggregateOperator.CountDistinct, "OrderInput", "countDistinct");
         ConfigureOperatorInputField(descriptor, collectionField, scalarFields, isFlat, AggregateOperator.Sum, "OrderInput", "sum");
         ConfigureOperatorInputField(descriptor, collectionField, scalarFields, isFlat, AggregateOperator.Avg, "OrderInput", "avg");
+        ConfigureOperatorInputField(descriptor, collectionField, scalarFields, isFlat, AggregateOperator.Var, "OrderInput", "var");
+        ConfigureOperatorInputField(descriptor, collectionField, scalarFields, isFlat, AggregateOperator.Varp, "OrderInput", "varp");
         ConfigureOperatorInputField(descriptor, collectionField, scalarFields, isFlat, AggregateOperator.Min, "OrderInput", "min");
         ConfigureOperatorInputField(descriptor, collectionField, scalarFields, isFlat, AggregateOperator.Max, "OrderInput", "max");
         ConfigureOperatorInputField(descriptor, collectionField, scalarFields, isFlat, AggregateOperator.Stdev, "OrderInput", "stdev");
@@ -722,6 +730,8 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
         RegisterOperatorInputType(builder, collectionField, isFlat, scalarFields, AggregateOperator.CountDistinct, "OrderInput");
         RegisterOperatorInputType(builder, collectionField, isFlat, scalarFields, AggregateOperator.Sum, "OrderInput");
         RegisterOperatorInputType(builder, collectionField, isFlat, scalarFields, AggregateOperator.Avg, "OrderInput");
+        RegisterOperatorInputType(builder, collectionField, isFlat, scalarFields, AggregateOperator.Var, "OrderInput");
+        RegisterOperatorInputType(builder, collectionField, isFlat, scalarFields, AggregateOperator.Varp, "OrderInput");
         RegisterOperatorInputType(builder, collectionField, isFlat, scalarFields, AggregateOperator.Min, "OrderInput");
         RegisterOperatorInputType(builder, collectionField, isFlat, scalarFields, AggregateOperator.Max, "OrderInput");
         RegisterOperatorInputType(builder, collectionField, isFlat, scalarFields, AggregateOperator.Stdev, "OrderInput");
@@ -733,6 +743,8 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
         RegisterOperatorInputType(builder, collectionField, isFlat, scalarFields, AggregateOperator.CountDistinct, "HavingInput");
         RegisterOperatorInputType(builder, collectionField, isFlat, scalarFields, AggregateOperator.Sum, "HavingInput");
         RegisterOperatorInputType(builder, collectionField, isFlat, scalarFields, AggregateOperator.Avg, "HavingInput");
+        RegisterOperatorInputType(builder, collectionField, isFlat, scalarFields, AggregateOperator.Var, "HavingInput");
+        RegisterOperatorInputType(builder, collectionField, isFlat, scalarFields, AggregateOperator.Varp, "HavingInput");
         RegisterOperatorInputType(builder, collectionField, isFlat, scalarFields, AggregateOperator.Min, "HavingInput");
         RegisterOperatorInputType(builder, collectionField, isFlat, scalarFields, AggregateOperator.Max, "HavingInput");
         RegisterOperatorInputType(builder, collectionField, isFlat, scalarFields, AggregateOperator.Stdev, "HavingInput");
@@ -782,7 +794,7 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
         @operator switch
         {
             AggregateOperator.CountDistinct => "CeFloatOperationFilterInput",
-            AggregateOperator.Sum or AggregateOperator.Avg or AggregateOperator.Stdev or AggregateOperator.Stdevp or AggregateOperator.Skew or AggregateOperator.Kurtosis => "CeFloatOperationFilterInput",
+            AggregateOperator.Sum or AggregateOperator.Avg or AggregateOperator.Var or AggregateOperator.Varp or AggregateOperator.Stdev or AggregateOperator.Stdevp or AggregateOperator.Skew or AggregateOperator.Kurtosis => "CeFloatOperationFilterInput",
             AggregateOperator.StringAgg or AggregateOperator.StringAggDistinct => "CeStringOperationFilterInput",
             _ => GraphQlTypeReferenceHelper.GetOperationFilterTypeName(field.ClrType)
         };
@@ -986,7 +998,7 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
         AggregateOperator @operator) =>
         @operator switch
         {
-            AggregateOperator.Sum or AggregateOperator.Avg or AggregateOperator.Stdev or AggregateOperator.Stdevp or AggregateOperator.Skew or AggregateOperator.Kurtosis =>
+            AggregateOperator.Sum or AggregateOperator.Avg or AggregateOperator.Var or AggregateOperator.Varp or AggregateOperator.Stdev or AggregateOperator.Stdevp or AggregateOperator.Skew or AggregateOperator.Kurtosis =>
                 scalarFields.Where(field => field.IsNumeric).ToArray(),
             AggregateOperator.StringAgg or AggregateOperator.StringAggDistinct =>
                 scalarFields.Where(field => field.IsString).ToArray(),
@@ -1003,7 +1015,7 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
         @operator switch
         {
             AggregateOperator.CountDistinct => "Int",
-            AggregateOperator.Sum or AggregateOperator.Avg or AggregateOperator.Stdev or AggregateOperator.Stdevp or AggregateOperator.Skew or AggregateOperator.Kurtosis => "Float",
+            AggregateOperator.Sum or AggregateOperator.Avg or AggregateOperator.Var or AggregateOperator.Varp or AggregateOperator.Stdev or AggregateOperator.Stdevp or AggregateOperator.Skew or AggregateOperator.Kurtosis => "Float",
             AggregateOperator.StringAgg or AggregateOperator.StringAggDistinct => "String",
             _ => GraphQlTypeReferenceHelper.GetOptionalScalarTypeSyntax(field.ClrType)
         };

@@ -1,4 +1,5 @@
 using System.Linq.Expressions;
+using System.Reflection;
 using System.Runtime.CompilerServices;
 using HotChocolate.Extension.CollectionEnhancements.Execution;
 using HotChocolate.Extension.CollectionEnhancements.Metadata;
@@ -74,6 +75,84 @@ public sealed class EfCoreProviderMomentCoverageTests
     }
 
     [Fact]
+    public void OracleProviderPackage_ShouldNotExposeNativeVarianceAndStandardDeviationMethods()
+    {
+        var assembly = Assembly.Load("Oracle.EntityFrameworkCore");
+        var extensionsType = assembly.GetTypes()
+            .Single(type => string.Equals(type.Name, "OracleDbFunctionsExtensions", StringComparison.Ordinal));
+        var methodNames = extensionsType
+            .GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Select(method => method.Name)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.DoesNotContain("VarianceSample", methodNames);
+        Assert.DoesNotContain("VariancePopulation", methodNames);
+        Assert.DoesNotContain("StandardDeviationSample", methodNames);
+        Assert.DoesNotContain("StandardDeviationPopulation", methodNames);
+
+        Assert.Null(ReflectionTestSupport.InvokeStatic(
+            typeof(CollectionExecutionEngine),
+            "GetProviderAggregateExtensionsType",
+            "Definitely.Missing.Provider",
+            "MissingDbFunctionsExtensions"));
+
+        var missingMethods = Assert.IsType<MethodInfo[]>(ReflectionTestSupport.InvokeStatic(
+            typeof(CollectionExecutionEngine),
+            "GetProviderAggregateExtensionMethods",
+            "Definitely.Missing.Provider",
+            "MissingDbFunctionsExtensions"));
+        Assert.Empty(missingMethods);
+
+        var sqlServerMethods = Assert.IsType<MethodInfo[]>(ReflectionTestSupport.InvokeStatic(
+            typeof(CollectionExecutionEngine),
+            "GetProviderAggregateExtensionMethods",
+            "Microsoft.EntityFrameworkCore.SqlServer",
+            "SqlServerDbFunctionsExtensions"));
+        Assert.Contains(sqlServerMethods, method => string.Equals(method.Name, "VarianceSample", StringComparison.Ordinal));
+
+        Assert.False((bool)InvokePrivate(
+            FastEngine,
+            "TryGetNativeVarianceMethod",
+            EfCoreProviderFamily.Oracle,
+            typeof(decimal),
+            false,
+            null,
+            null,
+            out _)!);
+
+        Assert.False((bool)InvokePrivate(
+            FastEngine,
+            "TryGetNativeVarianceMethod",
+            EfCoreProviderFamily.Oracle,
+            typeof(decimal),
+            true,
+            null,
+            null,
+            out _)!);
+
+        Assert.False((bool)InvokePrivate(
+            FastEngine,
+            "TryGetNativeStandardDeviationMethod",
+            EfCoreProviderFamily.Oracle,
+            typeof(decimal),
+            false,
+            null,
+            null,
+            out _)!);
+
+        Assert.False((bool)InvokePrivate(
+            FastEngine,
+            "TryGetNativeStandardDeviationMethod",
+            EfCoreProviderFamily.Oracle,
+            typeof(decimal),
+            true,
+            null,
+            null,
+            out _)!);
+    }
+
+    [Fact]
     public void FastMode_ShouldUseGenericRelationalMomentFallback_ForSqliteAndOracle()
     {
         var sqliteSelection = new AggregateSelectionContext(
@@ -87,6 +166,8 @@ public sealed class EfCoreProviderMomentCoverageTests
 
         foreach (var aggregateOperator in new[]
                  {
+                     AggregateOperator.Var,
+                     AggregateOperator.Varp,
                      AggregateOperator.Stdev,
                      AggregateOperator.Stdevp,
                      AggregateOperator.Skew,
@@ -104,7 +185,7 @@ public sealed class EfCoreProviderMomentCoverageTests
     }
 
     [Fact]
-    public void FastMode_ShouldUseNativeStandardDeviation_ForSqlServerAndPostgreSql()
+    public void FastMode_ShouldUseNativeVarianceAndStandardDeviation_ForSqlServerAndPostgreSql()
     {
         var sqlServerInvocations = new List<string>();
         var sqlServerSelection = new AggregateSelectionContext(
@@ -118,12 +199,24 @@ public sealed class EfCoreProviderMomentCoverageTests
                     sqlServerInvocations.Add(methodCall.Method.Name);
                     return methodCall.Method.Name switch
                     {
+                        "VarianceSample" => 156.25d,
+                        "VariancePopulation" => 85.5625d,
                         "StandardDeviationSample" => 12.5d,
                         "StandardDeviationPopulation" => 9.25d,
                         _ => ServiceBackedQueryProvider.UnhandledExecution.Instance
                     };
                 }));
 
+        Assert.Equal(
+            156.25d,
+            FastEngine.ResolveAggregateProjectionField(
+                new AggregateProjection(sqlServerSelection, AggregateOperator.Var, null, null),
+                "total"));
+        Assert.Equal(
+            85.5625d,
+            FastEngine.ResolveAggregateProjectionField(
+                new AggregateProjection(sqlServerSelection, AggregateOperator.Varp, null, null),
+                "total"));
         Assert.Equal(
             12.5d,
             FastEngine.ResolveAggregateProjectionField(
@@ -134,6 +227,8 @@ public sealed class EfCoreProviderMomentCoverageTests
             FastEngine.ResolveAggregateProjectionField(
                 new AggregateProjection(sqlServerSelection, AggregateOperator.Stdevp, null, null),
                 "total"));
+        Assert.Contains("VarianceSample", sqlServerInvocations);
+        Assert.Contains("VariancePopulation", sqlServerInvocations);
         Assert.Contains("StandardDeviationSample", sqlServerInvocations);
         Assert.Contains("StandardDeviationPopulation", sqlServerInvocations);
 
@@ -149,12 +244,24 @@ public sealed class EfCoreProviderMomentCoverageTests
                     npgsqlInvocations.Add(methodCall.Method.Name);
                     return methodCall.Method.Name switch
                     {
+                        "VarianceSample" => 76.5625d,
+                        "VariancePopulation" => 56.25d,
                         "StandardDeviationSample" => 8.75d,
                         "StandardDeviationPopulation" => 7.5d,
                         _ => ServiceBackedQueryProvider.UnhandledExecution.Instance
                     };
                 }));
 
+        Assert.Equal(
+            76.5625d,
+            FastEngine.ResolveAggregateProjectionField(
+                new AggregateProjection(npgsqlSelection, AggregateOperator.Var, null, null),
+                "total"));
+        Assert.Equal(
+            56.25d,
+            FastEngine.ResolveAggregateProjectionField(
+                new AggregateProjection(npgsqlSelection, AggregateOperator.Varp, null, null),
+                "total"));
         Assert.Equal(
             8.75d,
             FastEngine.ResolveAggregateProjectionField(
@@ -165,6 +272,8 @@ public sealed class EfCoreProviderMomentCoverageTests
             FastEngine.ResolveAggregateProjectionField(
                 new AggregateProjection(npgsqlSelection, AggregateOperator.Stdevp, null, null),
                 "total"));
+        Assert.Contains("VarianceSample", npgsqlInvocations);
+        Assert.Contains("VariancePopulation", npgsqlInvocations);
         Assert.Contains("StandardDeviationSample", npgsqlInvocations);
         Assert.Contains("StandardDeviationPopulation", npgsqlInvocations);
 
@@ -177,6 +286,56 @@ public sealed class EfCoreProviderMomentCoverageTests
     }
 
     [Fact]
+    public void FastMode_ShouldFallbackForOracle_WhenProviderPackageDoesNotExposeNativeMomentAggregates()
+    {
+        var oracleInvocations = new List<string>();
+        var oracleSelection = new AggregateSelectionContext(
+            OrdersField,
+            isFlat: false,
+            CreateProviderQueryable(
+                "Oracle.EntityFrameworkCore",
+                relational: true,
+                interceptor: methodCall =>
+                {
+                    oracleInvocations.Add(methodCall.Method.Name);
+                    return methodCall.Method.Name switch
+                    {
+                        "VarianceSample" => 91.5d,
+                        "VariancePopulation" => 68.625d,
+                        "StandardDeviationSample" => 9.565563234854496d,
+                        "StandardDeviationPopulation" => 8.284020762890446d,
+                        _ => ServiceBackedQueryProvider.UnhandledExecution.Instance
+                    };
+                }));
+
+        AssertAggregateEquivalent(
+            ResolveRowAggregate(AggregateOperator.Var),
+            FastEngine.ResolveAggregateProjectionField(
+                new AggregateProjection(oracleSelection, AggregateOperator.Var, null, null),
+                "total"));
+        AssertAggregateEquivalent(
+            ResolveRowAggregate(AggregateOperator.Varp),
+            FastEngine.ResolveAggregateProjectionField(
+                new AggregateProjection(oracleSelection, AggregateOperator.Varp, null, null),
+                "total"));
+        AssertAggregateEquivalent(
+            ResolveRowAggregate(AggregateOperator.Stdev),
+            FastEngine.ResolveAggregateProjectionField(
+                new AggregateProjection(oracleSelection, AggregateOperator.Stdev, null, null),
+                "total"));
+        AssertAggregateEquivalent(
+            ResolveRowAggregate(AggregateOperator.Stdevp),
+            FastEngine.ResolveAggregateProjectionField(
+                new AggregateProjection(oracleSelection, AggregateOperator.Stdevp, null, null),
+                "total"));
+
+        Assert.DoesNotContain("VarianceSample", oracleInvocations);
+        Assert.DoesNotContain("VariancePopulation", oracleInvocations);
+        Assert.DoesNotContain("StandardDeviationSample", oracleInvocations);
+        Assert.DoesNotContain("StandardDeviationPopulation", oracleInvocations);
+    }
+
+    [Fact]
     public void StableMode_ShouldFallbackToWelfordIteration_ForRelationalProviders()
     {
         var stableSelection = new AggregateSelectionContext(
@@ -186,12 +345,15 @@ public sealed class EfCoreProviderMomentCoverageTests
                 "Microsoft.EntityFrameworkCore.SqlServer",
                 relational: true,
                 interceptor: methodCall =>
-                    methodCall.Method.Name.StartsWith("StandardDeviation", StringComparison.Ordinal)
-                        ? throw new InvalidOperationException("Stable mode should not call provider-native stddev.")
+                    methodCall.Method.Name.StartsWith("StandardDeviation", StringComparison.Ordinal) ||
+                    methodCall.Method.Name.StartsWith("Variance", StringComparison.Ordinal)
+                        ? throw new InvalidOperationException("Stable mode should not call provider-native variance or stddev.")
                         : ServiceBackedQueryProvider.UnhandledExecution.Instance));
 
         foreach (var aggregateOperator in new[]
                  {
+                     AggregateOperator.Var,
+                     AggregateOperator.Varp,
                      AggregateOperator.Stdev,
                      AggregateOperator.Stdevp,
                      AggregateOperator.Skew,
@@ -246,6 +408,8 @@ public sealed class EfCoreProviderMomentCoverageTests
             isFlat: false,
             CreateProviderQueryable("Microsoft.EntityFrameworkCore.Sqlite", relational: true, source: Array.Empty<Order>().AsQueryable()));
 
+        Assert.Null(FastEngine.ResolveAggregateProjectionField(new AggregateProjection(emptySelection, AggregateOperator.Var, null, null), "total"));
+        Assert.Null(FastEngine.ResolveAggregateProjectionField(new AggregateProjection(emptySelection, AggregateOperator.Varp, null, null), "total"));
         Assert.Null(FastEngine.ResolveAggregateProjectionField(new AggregateProjection(emptySelection, AggregateOperator.Stdev, null, null), "total"));
         Assert.Null(FastEngine.ResolveAggregateProjectionField(new AggregateProjection(emptySelection, AggregateOperator.Stdevp, null, null), "total"));
         Assert.Null(FastEngine.ResolveAggregateProjectionField(new AggregateProjection(emptySelection, AggregateOperator.Skew, null, null), "total"));
@@ -255,6 +419,8 @@ public sealed class EfCoreProviderMomentCoverageTests
             OrdersField,
             isFlat: false,
             CreateProviderQueryable("Microsoft.EntityFrameworkCore.Sqlite", relational: true, source: ExampleData.Customers[0].Orders.Take(1).AsQueryable()));
+        Assert.Equal(0d, FastEngine.ResolveAggregateProjectionField(new AggregateProjection(singleSelection, AggregateOperator.Var, null, null), "total"));
+        Assert.Equal(0d, FastEngine.ResolveAggregateProjectionField(new AggregateProjection(singleSelection, AggregateOperator.Varp, null, null), "total"));
         Assert.Equal(0d, FastEngine.ResolveAggregateProjectionField(new AggregateProjection(singleSelection, AggregateOperator.Stdev, null, null), "total"));
         Assert.Equal(0d, FastEngine.ResolveAggregateProjectionField(new AggregateProjection(singleSelection, AggregateOperator.Stdevp, null, null), "total"));
         Assert.Equal(0d, FastEngine.ResolveAggregateProjectionField(new AggregateProjection(singleSelection, AggregateOperator.Skew, null, null), "total"));
@@ -287,7 +453,7 @@ public sealed class EfCoreProviderMomentCoverageTests
             "TryExecuteQueryableMomentAggregate",
             ExampleData.Customers[0].Orders.AsQueryable(),
             totalScalar,
-            AggregateOperator.Stdev,
+            AggregateOperator.Var,
             null,
             out var nonEfArguments)!);
         Assert.Null(nonEfArguments[3]);
@@ -297,7 +463,7 @@ public sealed class EfCoreProviderMomentCoverageTests
             "TryExecuteQueryableMomentAggregate",
             relationalQueryable,
             totalScalar,
-            AggregateOperator.Stdev,
+            AggregateOperator.Var,
             null,
             out var stableArguments)!);
         Assert.Null(stableArguments[3]);
@@ -307,7 +473,7 @@ public sealed class EfCoreProviderMomentCoverageTests
             "TryExecuteQueryableMomentAggregate",
             relationalQueryable,
             referenceScalar,
-            AggregateOperator.Stdev,
+            AggregateOperator.Var,
             null,
             out var nonNumericMomentArguments)!);
         Assert.Null(nonNumericMomentArguments[3]);
@@ -321,6 +487,36 @@ public sealed class EfCoreProviderMomentCoverageTests
             null,
             out var invalidMomentArguments)!);
         Assert.Null(invalidMomentArguments[3]);
+
+        Assert.False((bool)InvokePrivate(
+            FastEngine,
+            "TryGetNativeVarianceMethod",
+            EfCoreProviderFamily.RelationalGeneric,
+            typeof(decimal),
+            false,
+            null,
+            null,
+            out var unsupportedVarianceArguments)!);
+
+        Assert.False((bool)InvokePrivate(
+            FastEngine,
+            "TryGetNativeVarianceMethod",
+            EfCoreProviderFamily.SqlServer,
+            typeof(bool),
+            false,
+            null,
+            null,
+            out _)!);
+
+        Assert.True((bool)InvokePrivate(
+            FastEngine,
+            "TryGetNativeVarianceMethod",
+            EfCoreProviderFamily.SqlServer,
+            typeof(byte),
+            false,
+            null,
+            null,
+            out _)!);
 
         Assert.False((bool)InvokePrivate(
             FastEngine,
@@ -359,6 +555,75 @@ public sealed class EfCoreProviderMomentCoverageTests
             typeof(byte),
             false,
             null,
+            null,
+            out _)!);
+
+        var throwingVarianceQueryable = CreateProviderQueryable(
+            "Microsoft.EntityFrameworkCore.SqlServer",
+            relational: true,
+            interceptor: methodCall => methodCall.Method.Name.StartsWith("Variance", StringComparison.Ordinal)
+                ? throw new InvalidOperationException("boom")
+                : ServiceBackedQueryProvider.UnhandledExecution.Instance);
+        Assert.False((bool)InvokePrivate(
+            FastEngine,
+            "TryExecuteNativeVariance",
+            throwingVarianceQueryable,
+            totalScalar,
+            new EfCoreProviderInfo(true, true, EfCoreProviderFamily.SqlServer, "Microsoft.EntityFrameworkCore.SqlServer"),
+            false,
+            null,
+            out var throwingVarianceArguments)!);
+        Assert.Null(throwingVarianceArguments[4]);
+
+        Assert.True((bool)InvokePrivate(
+            FastEngine,
+            "TryExecuteNativeVariance",
+            CreateProviderQueryable("Microsoft.EntityFrameworkCore.SqlServer", relational: true, source: Array.Empty<Order>().AsQueryable()),
+            totalScalar,
+            new EfCoreProviderInfo(true, true, EfCoreProviderFamily.SqlServer, "Microsoft.EntityFrameworkCore.SqlServer"),
+            false,
+            null,
+            out var emptyVarianceArguments)!);
+        Assert.Null(emptyVarianceArguments[4]);
+
+        Assert.True((bool)InvokePrivate(
+            FastEngine,
+            "TryExecuteNativeVariance",
+            CreateProviderQueryable("Microsoft.EntityFrameworkCore.SqlServer", relational: true, source: ExampleData.Customers[0].Orders.Take(1).AsQueryable()),
+            totalScalar,
+            new EfCoreProviderInfo(true, true, EfCoreProviderFamily.SqlServer, "Microsoft.EntityFrameworkCore.SqlServer"),
+            true,
+            null,
+            out var singleVarianceArguments)!);
+        Assert.Equal(0d, singleVarianceArguments[4]);
+
+        Assert.True((bool)InvokePrivate(
+            FastEngine,
+            "TryExecuteNativeVariance",
+            CreateProviderQueryable(
+                "Microsoft.EntityFrameworkCore.SqlServer",
+                relational: true,
+                interceptor: methodCall => methodCall.Method.Name == "VarianceSample"
+                    ? ServiceBackedQueryProvider.NullExecution.Instance
+                    : ServiceBackedQueryProvider.UnhandledExecution.Instance),
+            totalScalar,
+            new EfCoreProviderInfo(true, true, EfCoreProviderFamily.SqlServer, "Microsoft.EntityFrameworkCore.SqlServer"),
+            false,
+            null,
+            out var nullVarianceArguments)!);
+        Assert.Null(nullVarianceArguments[4]);
+
+        Assert.False((bool)InvokePrivate(
+            FastEngine,
+            "TryExecuteNativeVariance",
+            new ServiceBackedQueryable<Order>(
+                ExampleData.Customers[0].Orders.AsQueryable(),
+                CreateProviderServices("Microsoft.EntityFrameworkCore.Sqlite", relational: true),
+                interceptor: null,
+                throwOnCreateQuery: true),
+            totalScalar,
+            new EfCoreProviderInfo(true, true, EfCoreProviderFamily.SqlServer, "Microsoft.EntityFrameworkCore.SqlServer"),
+            false,
             null,
             out _)!);
 

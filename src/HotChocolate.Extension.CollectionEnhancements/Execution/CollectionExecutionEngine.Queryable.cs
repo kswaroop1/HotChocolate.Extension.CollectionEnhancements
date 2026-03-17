@@ -1087,6 +1087,12 @@ internal sealed partial class CollectionExecutionEngine
             AggregateOperator.CountDistinct => ExecuteQueryableCountDistinct(queryable, scalarField),
             AggregateOperator.Sum => ExecuteQueryableNumericAggregate(queryable, scalarField, nameof(Queryable.Sum)),
             AggregateOperator.Avg => ExecuteQueryableNumericAggregate(queryable, scalarField, nameof(Queryable.Average)),
+            AggregateOperator.Var => TryExecuteQueryableMomentAggregate(queryable, scalarField, aggregateOperator, out var sampleVariance)
+                ? sampleVariance
+                : UnsupportedAggregateValue.Instance,
+            AggregateOperator.Varp => TryExecuteQueryableMomentAggregate(queryable, scalarField, aggregateOperator, out var populationVariance)
+                ? populationVariance
+                : UnsupportedAggregateValue.Instance,
             AggregateOperator.Min => ExecuteQueryableMinOrMax(queryable, scalarField, min: true),
             AggregateOperator.Max => ExecuteQueryableMinOrMax(queryable, scalarField, min: false),
             AggregateOperator.Stdev => TryExecuteQueryableMomentAggregate(queryable, scalarField, aggregateOperator, out var sampleStdev)
@@ -1208,6 +1214,12 @@ internal sealed partial class CollectionExecutionEngine
             return false;
         }
 
+        if ((aggregateOperator is AggregateOperator.Var or AggregateOperator.Varp) &&
+            TryExecuteNativeVariance(queryable, scalarField, providerInfo, aggregateOperator == AggregateOperator.Varp, out value))
+        {
+            return true;
+        }
+
         if ((aggregateOperator is AggregateOperator.Stdev or AggregateOperator.Stdevp) &&
             TryExecuteNativeStandardDeviation(queryable, scalarField, providerInfo, aggregateOperator == AggregateOperator.Stdevp, out value))
         {
@@ -1221,6 +1233,8 @@ internal sealed partial class CollectionExecutionEngine
 
         value = aggregateOperator switch
         {
+            AggregateOperator.Var => statistics.GetSampleVariance(),
+            AggregateOperator.Varp => statistics.GetPopulationVariance(),
             AggregateOperator.Stdev => statistics.GetSampleStandardDeviation(),
             AggregateOperator.Stdevp => statistics.GetPopulationStandardDeviation(),
             AggregateOperator.Skew => statistics.GetSkewness(),
@@ -1228,6 +1242,57 @@ internal sealed partial class CollectionExecutionEngine
             _ => null
         };
         return true;
+    }
+
+    private bool TryExecuteNativeVariance(
+        IQueryable queryable,
+        ScalarFieldModel scalarField,
+        EfCoreProviderInfo providerInfo,
+        bool population,
+        out object? value)
+    {
+        value = null;
+
+        if (!TryGetNativeVarianceMethod(providerInfo.Family, scalarField.ClrType, population, out var method, out var projectionType))
+        {
+            return false;
+        }
+
+        if (!TryCreateQueryableProjection(queryable, scalarField, projectionType, out var projected))
+        {
+            return false;
+        }
+
+        var count = ExecuteQueryableCount(projected);
+        if (count == 0)
+        {
+            value = null;
+            return true;
+        }
+
+        if (count == 1)
+        {
+            value = 0d;
+            return true;
+        }
+
+        try
+        {
+            var call = Expression.Call(
+                method,
+                Expression.Property(null, typeof(EF), nameof(EF.Functions)),
+                projected.Expression);
+            var result = projected.Provider.Execute(call);
+            value = result is null
+                ? null
+                : Convert.ToDouble(result, CultureInfo.InvariantCulture);
+            return true;
+        }
+        catch
+        {
+            value = null;
+            return false;
+        }
     }
 
     private bool TryExecuteNativeStandardDeviation(
@@ -1297,28 +1362,21 @@ internal sealed partial class CollectionExecutionEngine
             return false;
         }
 
-        var (typeName, assemblyName) = family switch
+        var (simpleTypeName, assemblyName) = family switch
         {
-            EfCoreProviderFamily.SqlServer => ("Microsoft.EntityFrameworkCore.SqlServerDbFunctionsExtensions", "Microsoft.EntityFrameworkCore.SqlServer"),
-            EfCoreProviderFamily.PostgreSql => ("Microsoft.EntityFrameworkCore.NpgsqlAggregateDbFunctionsExtensions", "Npgsql.EntityFrameworkCore.PostgreSQL"),
-            EfCoreProviderFamily.Oracle => ("Oracle.EntityFrameworkCore.Extensions.OracleDbFunctionsExtensions", "Oracle.EntityFrameworkCore"),
+            EfCoreProviderFamily.SqlServer => ("SqlServerDbFunctionsExtensions", "Microsoft.EntityFrameworkCore.SqlServer"),
+            EfCoreProviderFamily.PostgreSql => ("NpgsqlAggregateDbFunctionsExtensions", "Npgsql.EntityFrameworkCore.PostgreSQL"),
+            EfCoreProviderFamily.Oracle => ("OracleDbFunctionsExtensions", "Oracle.EntityFrameworkCore"),
             _ => default
         };
 
-        if (string.IsNullOrWhiteSpace(typeName) || string.IsNullOrWhiteSpace(assemblyName))
+        if (string.IsNullOrWhiteSpace(simpleTypeName) || string.IsNullOrWhiteSpace(assemblyName))
         {
             return false;
         }
 
         var methodName = population ? "StandardDeviationPopulation" : "StandardDeviationSample";
-        var providerType = Type.GetType($"{typeName}, {assemblyName}", throwOnError: false);
-        if (providerType is null)
-        {
-            return false;
-        }
-
-        method = providerType
-            .GetMethods(BindingFlags.Public | BindingFlags.Static)
+        method = GetProviderAggregateExtensionMethods(assemblyName, simpleTypeName)
             .FirstOrDefault(candidate =>
             {
                 if (!string.Equals(candidate.Name, methodName, StringComparison.Ordinal))
@@ -1336,6 +1394,78 @@ internal sealed partial class CollectionExecutionEngine
             })!;
         return method is not null;
     }
+
+    private static bool TryGetNativeVarianceMethod(
+        EfCoreProviderFamily family,
+        Type clrType,
+        bool population,
+        out MethodInfo method,
+        out Type projectionType)
+    {
+        var candidateProjectionType = Nullable.GetUnderlyingType(clrType) ?? clrType;
+        projectionType = candidateProjectionType;
+        method = null!;
+
+        if (!IsNativeAggregateNumericType(candidateProjectionType))
+        {
+            return false;
+        }
+
+        var (simpleTypeName, assemblyName) = family switch
+        {
+            EfCoreProviderFamily.SqlServer => ("SqlServerDbFunctionsExtensions", "Microsoft.EntityFrameworkCore.SqlServer"),
+            EfCoreProviderFamily.PostgreSql => ("NpgsqlAggregateDbFunctionsExtensions", "Npgsql.EntityFrameworkCore.PostgreSQL"),
+            EfCoreProviderFamily.Oracle => ("OracleDbFunctionsExtensions", "Oracle.EntityFrameworkCore"),
+            _ => default
+        };
+
+        if (string.IsNullOrWhiteSpace(simpleTypeName) || string.IsNullOrWhiteSpace(assemblyName))
+        {
+            return false;
+        }
+
+        var methodName = population ? "VariancePopulation" : "VarianceSample";
+        method = GetProviderAggregateExtensionMethods(assemblyName, simpleTypeName)
+            .FirstOrDefault(candidate =>
+            {
+                if (!string.Equals(candidate.Name, methodName, StringComparison.Ordinal))
+                {
+                    return false;
+                }
+
+                var parameters = candidate.GetParameters();
+                if (parameters.Length != 2 || !parameters[1].ParameterType.IsGenericType)
+                {
+                    return false;
+                }
+
+                return parameters[1].ParameterType.GetGenericArguments()[0] == candidateProjectionType;
+            })!;
+        return method is not null;
+    }
+
+    private static Type? GetProviderAggregateExtensionsType(string assemblyName, string simpleTypeName)
+    {
+        try
+        {
+            var assembly = Assembly.Load(assemblyName);
+            return assembly
+                .GetTypes()
+                .FirstOrDefault(candidate => string.Equals(candidate.Name, simpleTypeName, StringComparison.Ordinal));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    // Oracle remains in this lookup table because a future provider release may expose
+    // public aggregate DbFunctions, but Oracle EF Core 9.23.x currently does not expose
+    // native variance/stddev helpers, so Oracle falls through to the generic relational path.
+    private static MethodInfo[] GetProviderAggregateExtensionMethods(string assemblyName, string simpleTypeName) =>
+        GetProviderAggregateExtensionsType(assemblyName, simpleTypeName)?
+            .GetMethods(BindingFlags.Public | BindingFlags.Static)
+        ?? [];
 
     private static bool IsNativeAggregateNumericType(Type type) =>
         type == typeof(byte) ||
@@ -1480,6 +1610,31 @@ internal sealed partial class CollectionExecutionEngine
         double Raw3,
         double Raw4)
     {
+        public double? GetPopulationVariance()
+        {
+            if (Count == 0)
+            {
+                return null;
+            }
+
+            return ComputePopulationVariance();
+        }
+
+        public double? GetSampleVariance()
+        {
+            if (Count == 0)
+            {
+                return null;
+            }
+
+            if (Count == 1)
+            {
+                return 0d;
+            }
+
+            return ComputeSampleVariance();
+        }
+
         public double? GetPopulationStandardDeviation()
         {
             if (Count == 0)
@@ -1487,7 +1642,7 @@ internal sealed partial class CollectionExecutionEngine
                 return null;
             }
 
-            return Math.Sqrt(GetPopulationVariance());
+            return Math.Sqrt(ComputePopulationVariance());
         }
 
         public double? GetSampleStandardDeviation()
@@ -1502,7 +1657,7 @@ internal sealed partial class CollectionExecutionEngine
                 return 0d;
             }
 
-            return Math.Sqrt(GetSampleVariance());
+            return Math.Sqrt(ComputeSampleVariance());
         }
 
         public double? GetSkewness()
@@ -1537,9 +1692,9 @@ internal sealed partial class CollectionExecutionEngine
             return GetCentralMoment4() / (central2 * central2);
         }
 
-        private double GetPopulationVariance() => GetCentralMoment2();
+        private double ComputePopulationVariance() => GetCentralMoment2();
 
-        private double GetSampleVariance() => Math.Max(0d, GetCentralMoment2() * Count / (Count - 1d));
+        private double ComputeSampleVariance() => Math.Max(0d, GetCentralMoment2() * Count / (Count - 1d));
 
         private double GetCentralMoment2() => Math.Max(0d, Raw2 - (Raw1 * Raw1));
 
@@ -1853,6 +2008,21 @@ internal sealed partial class CollectionExecutionEngine
                     numericProjection);
                 return true;
 
+            case AggregateOperator.Var:
+            case AggregateOperator.Varp:
+                if (!TypeInspection.IsNumeric(scalarField.ClrType))
+                {
+                    return false;
+                }
+
+                expression = BuildEnumerableVarianceExpression(
+                    sequence,
+                    parameter,
+                    member,
+                    collectionField.ElementType,
+                    aggregateOperator == AggregateOperator.Varp);
+                return true;
+
             case AggregateOperator.Min:
             case AggregateOperator.Max:
                 Expression minMaxSequence = selected;
@@ -1890,6 +2060,82 @@ internal sealed partial class CollectionExecutionEngine
         }
     }
 
+    private static Expression BuildEnumerableVarianceExpression(
+        Expression sequence,
+        ParameterExpression parameter,
+        Expression member,
+        Type elementType,
+        bool population)
+    {
+        Expression filteredSequence = sequence;
+        if (CanBeNull(member.Type))
+        {
+            var notNullPredicate = Expression.Lambda(
+                Expression.NotEqual(member, Expression.Constant(null, member.Type)),
+                parameter);
+
+            filteredSequence = Expression.Call(
+                typeof(Enumerable),
+                nameof(Enumerable.Where),
+                [elementType],
+                sequence,
+                notNullPredicate);
+        }
+
+        var doubleProjection = Expression.Call(
+            typeof(Enumerable),
+            nameof(Enumerable.Select),
+            [elementType, typeof(double)],
+            filteredSequence,
+            Expression.Lambda(Expression.Convert(member, typeof(double)), parameter));
+
+        var count = Expression.Call(
+            typeof(Enumerable),
+            nameof(Enumerable.Count),
+            [elementType],
+            filteredSequence);
+        var countDouble = Expression.Convert(count, typeof(double));
+
+        var raw1 = Expression.Call(typeof(Enumerable), nameof(Enumerable.Average), Type.EmptyTypes, doubleProjection);
+
+        var squaredProjectionParameter = Expression.Parameter(typeof(double), "value");
+        var squaredProjection = Expression.Call(
+            typeof(Enumerable),
+            nameof(Enumerable.Select),
+            [typeof(double), typeof(double)],
+            doubleProjection,
+            Expression.Lambda(
+                Expression.Multiply(squaredProjectionParameter, squaredProjectionParameter),
+                squaredProjectionParameter));
+        var raw2 = Expression.Call(typeof(Enumerable), nameof(Enumerable.Average), Type.EmptyTypes, squaredProjection);
+
+        var central2 = Expression.Subtract(raw2, Expression.Multiply(raw1, raw1));
+        var variance = population
+            ? central2
+            : Expression.Multiply(central2, Expression.Divide(countDouble, Expression.Subtract(countDouble, Expression.Constant(1d))));
+        var clampedVariance = Expression.Condition(
+            Expression.LessThan(variance, Expression.Constant(0d)),
+            Expression.Constant(0d),
+            variance);
+
+        var nullResult = Expression.Constant(null, typeof(double?));
+        var zeroResult = Expression.Constant(0d, typeof(double?));
+        var varianceResult = Expression.Convert(clampedVariance, typeof(double?));
+
+        return population
+            ? Expression.Condition(
+                Expression.Equal(count, Expression.Constant(0)),
+                nullResult,
+                varianceResult)
+            : Expression.Condition(
+                Expression.Equal(count, Expression.Constant(0)),
+                nullResult,
+                Expression.Condition(
+                    Expression.Equal(count, Expression.Constant(1)),
+                    zeroResult,
+                    varianceResult));
+    }
+
     private static bool TryParseSupportedQueryableAggregateOperator(string name, out AggregateOperator aggregateOperator)
     {
         switch (name)
@@ -1902,6 +2148,12 @@ internal sealed partial class CollectionExecutionEngine
                 return true;
             case "avg":
                 aggregateOperator = AggregateOperator.Avg;
+                return true;
+            case "var":
+                aggregateOperator = AggregateOperator.Var;
+                return true;
+            case "varp":
+                aggregateOperator = AggregateOperator.Varp;
                 return true;
             case "min":
                 aggregateOperator = AggregateOperator.Min;

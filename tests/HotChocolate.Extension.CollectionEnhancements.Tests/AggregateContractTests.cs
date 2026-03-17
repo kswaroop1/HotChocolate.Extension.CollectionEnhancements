@@ -25,6 +25,12 @@ public sealed class AggregateContractTests
                   avg {
                     total
                   }
+                  var {
+                    total
+                  }
+                  varp {
+                    total
+                  }
                   min {
                     total
                     createdAt
@@ -68,6 +74,8 @@ public sealed class AggregateContractTests
         Assert.Equal(0, aggregate.GetProperty("countDistinct").GetProperty("reference").GetInt32());
         AssertPropertyIsNull(aggregate.GetProperty("sum"), "total");
         AssertPropertyIsNull(aggregate.GetProperty("avg"), "total");
+        AssertPropertyIsNull(aggregate.GetProperty("var"), "total");
+        AssertPropertyIsNull(aggregate.GetProperty("varp"), "total");
         AssertPropertyIsNull(aggregate.GetProperty("min"), "total");
         AssertPropertyIsNull(aggregate.GetProperty("min"), "createdAt");
         AssertPropertyIsNull(aggregate.GetProperty("max"), "total");
