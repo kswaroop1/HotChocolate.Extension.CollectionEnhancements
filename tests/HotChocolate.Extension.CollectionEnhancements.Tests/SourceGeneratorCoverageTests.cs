@@ -148,6 +148,84 @@ public sealed class SourceGeneratorCoverageTests
     }
 
     [Fact]
+    public void ModelDiscovery_ShouldSkipNestedCollectionElements_And_UnwrapAsyncCollectionMethods()
+    {
+        var compilation = CreateCompilation(
+            """
+            using System;
+            using System.Collections.Generic;
+            using System.Threading.Tasks;
+            using HotChocolate.Extension.CollectionEnhancements;
+
+            public sealed class ServiceAttribute : Attribute { }
+
+            [CollectionEnhancementModel(IsQueryRoot = true)]
+            public sealed class AsyncQueryRoot
+            {
+                public Task<IReadOnlyList<Row>> GetRowsAsync([Service] object services) =>
+                    Task.FromResult<IReadOnlyList<Row>>(Array.Empty<Row>());
+            }
+
+            public sealed class Row
+            {
+                public IReadOnlyList<string[]> Tags => Array.Empty<string[]>();
+
+                public IReadOnlyList<Child[]> ChildGroups => Array.Empty<Child[]>();
+
+                public IReadOnlyList<Child> Children => Array.Empty<Child>();
+            }
+
+            public sealed record Child(int Id);
+            """);
+
+        var model = CollectionEnhancementSourceGenerator.ModelDiscovery.Discover(compilation);
+        var queryRoot = Assert.Single(model.ObjectTypes.Where(type => type.IsQueryRoot));
+        Assert.Contains(queryRoot.CollectionFields, field => field.GraphQlName == "rowsAsync");
+
+        var rowType = Assert.Single(model.ObjectTypes.Where(type => type.GraphQlTypeName == "Row"));
+        Assert.Contains(rowType.CollectionFields, field => field.GraphQlName == "children");
+        Assert.DoesNotContain(rowType.CollectionFields, field => field.GraphQlName == "tags");
+        Assert.DoesNotContain(rowType.CollectionFields, field => field.GraphQlName == "childGroups");
+    }
+
+    [Fact]
+    public void ModelDiscovery_ShouldIgnoreFrameworkObjectMembers()
+    {
+        var compilation = CreateCompilation(
+            """
+            using System;
+            using System.Collections.Generic;
+            using System.Runtime.CompilerServices;
+            using System.Threading.Tasks;
+            using HotChocolate.Extension.CollectionEnhancements;
+
+            [CollectionEnhancementModel(IsQueryRoot = true)]
+            public sealed class Query
+            {
+                public IReadOnlyList<Row> GetRows() => Array.Empty<Row>();
+            }
+
+            public sealed class Row
+            {
+                public int Id => 1;
+                public Exception Error => new("boom");
+                public IComparer<string> Comparer => StringComparer.Ordinal;
+                public ConfiguredTaskAwaitable<int> Awaiter => Task.FromResult(1).ConfigureAwait(false);
+                public List<int>.Enumerator Enumerator => Array.Empty<int>().GetEnumerator();
+            }
+            """);
+
+        var model = CollectionEnhancementSourceGenerator.ModelDiscovery.Discover(compilation);
+        var rowType = Assert.Single(model.ObjectTypes.Where(type => type.GraphQlTypeName == "Row"));
+
+        Assert.Contains(rowType.ScalarFields, field => field.GraphQlName == "id");
+        Assert.DoesNotContain(rowType.ObjectFields, field => field.GraphQlName == "error");
+        Assert.DoesNotContain(rowType.ObjectFields, field => field.GraphQlName == "comparer");
+        Assert.DoesNotContain(rowType.ObjectFields, field => field.GraphQlName == "awaiter");
+        Assert.DoesNotContain(rowType.ObjectFields, field => field.GraphQlName == "enumerator");
+    }
+
+    [Fact]
     public void Generator_InternalHelpers_ShouldCoverRemainingBranches()
     {
         var compilation = CreateCompilation(
@@ -320,6 +398,7 @@ public sealed class SourceGeneratorCoverageTests
         Assert.Contains(generatedCollection.FlatPaths, path => path.Path == "children");
         Assert.Contains(generatedCollection.FlatPaths, path => path.Path == "selfQuery");
         Assert.Contains(generatedCollection.FlatPaths, path => path.Prefix == "categoryCoupon");
+        Assert.Contains(generatedCollection.FlatPaths, path => path.Prefix == "categoriesCoupon");
 
         var tagPath = new CollectionEnhancementSourceGenerator.ModelDiscovery.FlatPathInfo(
             "items.tags",

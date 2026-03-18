@@ -2,6 +2,8 @@ using System.Collections;
 using System.Globalization;
 using System.Reflection;
 using System.Reflection.Emit;
+using System.Runtime.CompilerServices;
+using HotChocolate.Extension.CollectionEnhancements;
 using HotChocolate.Extension.CollectionEnhancements.Execution;
 using HotChocolate.Extension.CollectionEnhancements.Metadata;
 using HotChocolate.Extension.CollectionEnhancements.Schema;
@@ -119,6 +121,11 @@ public sealed class MetadataUtilityCoverageTests
         Assert.Equal("coupon", GraphQlNaming.Singularize("coupons"));
         Assert.Equal("tag", GraphQlNaming.Singularize("tag"));
         Assert.Equal(nameof(Customer), GraphQlNaming.GetTypeName(typeof(Customer)));
+        Assert.Equal("Void", GraphQlNaming.GetTypeName(typeof(void)));
+        Assert.Equal("StringArray", GraphQlNaming.GetTypeName(typeof(string[])));
+        Assert.Equal("DictionaryStringInt32", GraphQlNaming.GetTypeName(typeof(Dictionary<string, int>)));
+        Assert.EndsWith("GenericOuterInt32InnerString", GraphQlNaming.GetTypeName(typeof(GenericOuter<int>.Inner<string>)), StringComparison.Ordinal);
+        Assert.Equal("T", GraphQlNaming.GetTypeName(typeof(GenericTypeNameProbe<>).GetGenericArguments()[0]));
     }
 
     [Fact]
@@ -150,6 +157,8 @@ public sealed class MetadataUtilityCoverageTests
         Assert.False(TypeInspection.IsStringLike(typeof(Guid)));
         Assert.True(TypeInspection.IsCollectionType(typeof(Coupon[]), out var arrayElement));
         Assert.Equal(typeof(Coupon), arrayElement);
+        Assert.True(TypeInspection.IsCollectionType(typeof(Task<IReadOnlyList<Customer>>), out var taskCollectionElement));
+        Assert.Equal(typeof(Customer), taskCollectionElement);
         Assert.True(TypeInspection.IsCollectionType(typeof(IQueryable<Customer>), out var queryableElement));
         Assert.Equal(typeof(Customer), queryableElement);
         Assert.True(TypeInspection.IsCollectionType(typeof(List<Order>), out var enumerableElement));
@@ -158,6 +167,12 @@ public sealed class MetadataUtilityCoverageTests
         Assert.Null(none);
         Assert.False(TypeInspection.IsCollectionType(typeof(CultureInfo), out none));
         Assert.Null(none);
+        Assert.Equal(typeof(IReadOnlyList<Customer>), TypeInspection.UnwrapTaskLike(typeof(Task<IReadOnlyList<Customer>>)));
+        Assert.Equal(typeof(Customer), TypeInspection.UnwrapTaskLike(typeof(ValueTask<Customer>)));
+        Assert.True(TypeInspection.IsScalar(typeof(Task<string>)));
+        Assert.True(TypeInspection.IsEnhancementObjectType(typeof(GenericOuter<int>.Inner<string>)));
+        Assert.False(TypeInspection.IsEnhancementObjectType(typeof(string[])));
+        Assert.False(TypeInspection.IsEnhancementObjectType(typeof(Task)));
 
         Assert.Equal("Boolean", GraphQlTypeReferenceHelper.GetScalarTypeName(typeof(bool)));
         Assert.Equal("Int", GraphQlTypeReferenceHelper.GetScalarTypeName(typeof(long)));
@@ -213,11 +228,56 @@ public sealed class MetadataUtilityCoverageTests
         Assert.Equal(
             typeof(IQueryable<Security>),
             ReflectionTestSupport.InvokeStatic(typeof(CollectionSchemaCatalog), "GetMemberType", typeof(Query).GetMethod(nameof(Query.GetSecurities))!));
+        Assert.Equal(
+            typeof(IReadOnlyList<Customer>),
+            ReflectionTestSupport.InvokeStatic(
+                typeof(CollectionSchemaCatalog),
+                "GetMemberType",
+                typeof(AsyncCollectionDiscoveryQuery).GetMethod(nameof(AsyncCollectionDiscoveryQuery.GetCustomersAsync))!));
 
         var eventInfo = typeof(DummyHost).GetEvent(nameof(DummyHost.Changed))!;
         var getMemberTypeFailure = Assert.Throws<TargetInvocationException>(() =>
             ReflectionTestSupport.InvokeStatic(typeof(CollectionSchemaCatalog), "GetMemberType", eventInfo));
         Assert.IsType<NotSupportedException>(getMemberTypeFailure.InnerException);
+    }
+
+    [Fact]
+    public void CollectionSchemaCatalog_ShouldIgnoreNestedCollectionElementTypes_And_DiscoverAsyncCollections()
+    {
+        var catalog = new CollectionSchemaCatalog();
+        var asyncQueryModel = Assert.IsType<ObjectTypeModel>(
+            ReflectionTestSupport.InvokeInstance(catalog, "GetOrCreateModel", typeof(AsyncCollectionDiscoveryQuery), true)!);
+        ReflectionTestSupport.InvokeInstance(catalog, "PopulateModel", asyncQueryModel);
+        Assert.NotNull(asyncQueryModel);
+        Assert.NotNull(asyncQueryModel.FindCollection("customersAsync"));
+
+        var nestedCollectionModel = catalog.TryGetObjectType(typeof(NestedCollectionEdgeHost));
+        Assert.NotNull(nestedCollectionModel);
+        Assert.Null(nestedCollectionModel.FindCollection("names"));
+        Assert.Null(nestedCollectionModel.FindCollection("rowGroups"));
+        Assert.DoesNotContain(catalog.ObjectTypes, type => type.GraphQlTypeName == "StringArray");
+        Assert.DoesNotContain(catalog.ObjectTypes, type => type.GraphQlTypeName.EndsWith("Array", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void CollectionSchemaCatalog_ShouldIgnoreFrameworkObjectMembers()
+    {
+        var catalog = new CollectionSchemaCatalog();
+        var rootModel = Assert.IsType<ObjectTypeModel>(
+            ReflectionTestSupport.InvokeInstance(catalog, "GetOrCreateModel", typeof(FrameworkEdgeQuery), true)!);
+        ReflectionTestSupport.InvokeInstance(catalog, "PopulateModel", rootModel);
+        Assert.Single(rootModel.CollectionFields);
+
+        var rowModel = catalog.TryGetObjectType(typeof(FrameworkEdgeRow));
+        Assert.NotNull(rowModel);
+        Assert.NotNull(rowModel.FindScalar("id"));
+        Assert.Null(rowModel.FindObject("error"));
+        Assert.Null(rowModel.FindObject("comparer"));
+        Assert.Null(rowModel.FindObject("awaiter"));
+        Assert.Null(rowModel.FindObject("enumerator"));
+        Assert.DoesNotContain(catalog.ObjectTypes, type => type.ClrType == typeof(Exception));
+        Assert.DoesNotContain(catalog.ObjectTypes, type => type.GraphQlTypeName.Contains("TaskAwait", StringComparison.Ordinal));
+        Assert.DoesNotContain(catalog.ObjectTypes, type => type.GraphQlTypeName.Contains("Comparer", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -256,7 +316,7 @@ public sealed class MetadataUtilityCoverageTests
 
         var objectModel = Assert.IsType<ObjectTypeModel>(
             ReflectionTestSupport.InvokeInstance(catalog, "GetOrCreateModel", typeof(PopulateCoverageHost), false)!);
-        Assert.Equal(nameof(PopulateCoverageHost), objectModel.GraphQlTypeName);
+        Assert.EndsWith(nameof(PopulateCoverageHost), objectModel.GraphQlTypeName, StringComparison.Ordinal);
 
         ReflectionTestSupport.InvokeInstance(catalog, "PopulateModel", objectModel);
         Assert.NotNull(objectModel.FindObject("child"));
@@ -315,7 +375,43 @@ public sealed class MetadataUtilityCoverageTests
 
         var paths = FlatPathCatalog.Discover(collection);
         Assert.Equal(["categories.coupons", "category.coupons"], paths.Select(path => path.Path).ToArray());
-        Assert.Equal(["categoryCoupon", "categoryCoupon"], paths.Select(path => path.Prefix).ToArray());
+        Assert.Equal(["categoriesCoupon", "categoryCoupon"], paths.Select(path => path.Prefix).ToArray());
+    }
+
+    [Fact]
+    public void CollectionSchemaCatalog_And_FlatPathCatalog_ShouldHandleCircularTypeGraphs()
+    {
+        var catalog = CollectionSchemaCatalog.CreateDefault();
+
+        var selfRootModel = catalog.TryGetObjectType(typeof(SelfCycleRoot));
+        Assert.NotNull(selfRootModel);
+        var selfRows = selfRootModel.FindCollection("rows");
+        Assert.NotNull(selfRows);
+        var selfRowModel = catalog.TryGetObjectType(typeof(SelfCycleRow));
+        Assert.NotNull(selfRowModel);
+        Assert.NotNull(selfRowModel.FindCollection("children"));
+
+        var selfPaths = FlatPathCatalog.Discover(selfRows);
+        Assert.Equal(["children"], selfPaths.Select(path => path.Path).ToArray());
+
+        var selfShape = FlatRowShapeCache.GetOrCreate(selfRows);
+        Assert.Equal(selfPaths.Count, selfShape.Paths.Count);
+        Assert.Equal("children", selfShape.GeneratedFieldOwners["childrenLabel"].Path);
+
+        var indirectRootModel = catalog.TryGetObjectType(typeof(IndirectCycleRoot));
+        Assert.NotNull(indirectRootModel);
+        var indirectRows = indirectRootModel.FindCollection("rows");
+        Assert.NotNull(indirectRows);
+        var indirectLeafModel = catalog.TryGetObjectType(typeof(IndirectCycleLeaf));
+        Assert.NotNull(indirectLeafModel);
+        Assert.NotNull(indirectLeafModel.FindObject("owner"));
+
+        var indirectPaths = FlatPathCatalog.Discover(indirectRows);
+        Assert.Equal(["branch.leaves"], indirectPaths.Select(path => path.Path).ToArray());
+
+        var indirectShape = FlatRowShapeCache.GetOrCreate(indirectRows);
+        Assert.Equal(indirectPaths.Count, indirectShape.Paths.Count);
+        Assert.Equal("branch.leaves", indirectShape.GeneratedFieldOwners["leaveValue"].Path);
     }
 
     [Fact]
@@ -436,6 +532,13 @@ public sealed class MetadataUtilityCoverageTests
 
     public sealed record FlatCoverageCoupon(DateOnly PaymentDate);
 
+    private sealed class GenericOuter<T>
+    {
+        public sealed class Inner<TInner>;
+    }
+
+    private sealed class GenericTypeNameProbe<T>;
+
     public sealed record FlatCoverageBranch(FlatCoverageCoupon[] Coupons);
 
     public sealed record FlatCoverageNested(FlatCoverageBranch BranchA, FlatCoverageBranch BranchB);
@@ -455,6 +558,75 @@ public sealed class MetadataUtilityCoverageTests
     {
         public required FallbackCoverageRow[] Rows { get; init; }
     }
+
+    public sealed class SelfCycleRoot
+    {
+        public required SelfCycleRow[] Rows { get; init; }
+    }
+
+    public sealed class SelfCycleRow
+    {
+        public string Label { get; init; } = string.Empty;
+
+        public required SelfCycleRow[] Children { get; init; }
+    }
+
+    public sealed class IndirectCycleRoot
+    {
+        public required IndirectCycleRow[] Rows { get; init; }
+    }
+
+    public sealed class IndirectCycleRow
+    {
+        public string Name { get; init; } = string.Empty;
+
+        public required IndirectCycleBranch Branch { get; init; }
+    }
+
+    public sealed class IndirectCycleBranch
+    {
+        public required IndirectCycleLeaf[] Leaves { get; init; }
+    }
+
+    public sealed class IndirectCycleLeaf
+    {
+        public int Value { get; init; }
+
+        public IndirectCycleRow? Owner { get; init; }
+    }
+
+    public sealed class AsyncCollectionDiscoveryQuery
+    {
+        public Task<IReadOnlyList<Customer>> GetCustomersAsync([Service] object service) =>
+            Task.FromResult<IReadOnlyList<Customer>>(Array.Empty<Customer>());
+    }
+
+    private sealed class NestedCollectionEdgeHost
+    {
+        public string[][] Names { get; init; } = [];
+
+        public IReadOnlyList<AsyncCollectionDiscoveryRow[]> RowGroups { get; init; } = [];
+    }
+
+    private sealed class FrameworkEdgeQuery
+    {
+        public FrameworkEdgeRow[] GetRows() => [];
+    }
+
+    private sealed class FrameworkEdgeRow
+    {
+        public int Id { get; init; }
+
+        public Exception Error { get; init; } = new("boom");
+
+        public IComparer<string> Comparer { get; init; } = StringComparer.Ordinal;
+
+        public ConfiguredTaskAwaitable<int> Awaiter => Task.FromResult(1).ConfigureAwait(false);
+
+        public List<int>.Enumerator Enumerator => Array.Empty<int>().ToList().GetEnumerator();
+    }
+
+    private sealed record AsyncCollectionDiscoveryRow(int Id);
 
     private sealed class QueryCoverageType
     {

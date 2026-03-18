@@ -1,4 +1,6 @@
+using System.Globalization;
 using System.Reflection;
+using System.Text;
 
 namespace HotChocolate.Extension.CollectionEnhancements.Metadata;
 
@@ -12,7 +14,60 @@ internal static class GraphQlNaming
             _ => ToCamelCase(member.Name)
         };
 
-    public static string GetTypeName(Type type) => type.Name;
+    public static string GetTypeName(Type type)
+    {
+        var actualType = TypeInspection.UnwrapTaskLike(type);
+
+        if (actualType == typeof(void))
+        {
+            return "Void";
+        }
+
+        if (actualType.IsArray)
+        {
+            return GetTypeName(actualType.GetElementType()!) + "Array";
+        }
+
+        if (actualType.IsGenericParameter)
+        {
+            return actualType.Name;
+        }
+
+        var chain = new Stack<Type>();
+        for (var current = actualType; current is not null; current = current.DeclaringType)
+        {
+            chain.Push(current);
+        }
+
+        var genericArguments = actualType.IsGenericType
+            ? actualType.GetGenericArguments()
+            : Type.EmptyTypes;
+        var argumentIndex = 0;
+        var builder = new StringBuilder();
+
+        while (chain.Count > 0)
+        {
+            var segment = chain.Pop();
+            var name = segment.Name;
+            var tickIndex = name.IndexOf('`');
+            var localArity = 0;
+
+            if (tickIndex >= 0)
+            {
+                localArity = int.Parse(name[(tickIndex + 1)..], CultureInfo.InvariantCulture);
+                name = name[..tickIndex];
+            }
+
+            builder.Append(name);
+
+            for (var index = 0; index < localArity && argumentIndex < genericArguments.Length; index++)
+            {
+                builder.Append(GetTypeName(genericArguments[argumentIndex++]));
+            }
+        }
+
+        return builder.ToString();
+    }
 
     public static string ToCamelCase(string value)
     {
@@ -62,4 +117,5 @@ internal static class GraphQlNaming
         value.StartsWith("Get", StringComparison.Ordinal) && value.Length > 3
             ? value[3..]
             : value;
+
 }

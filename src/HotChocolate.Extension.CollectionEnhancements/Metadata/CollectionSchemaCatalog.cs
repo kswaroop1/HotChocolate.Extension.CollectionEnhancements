@@ -33,9 +33,7 @@ internal sealed class CollectionSchemaCatalog
                 return existing;
             }
 
-            if (clrType.IsAbstract
-                || clrType == typeof(object)
-                || clrType.Namespace is null
+            if (!IsApplicationObjectType(clrType)
                 || !IsApplicationAssembly(clrType.Assembly))
             {
                 return null;
@@ -132,12 +130,18 @@ internal sealed class CollectionSchemaCatalog
 
         foreach (var objectField in objectFields)
         {
-            GetOrCreateModel(objectField.ClrType);
+            if (IsApplicationObjectType(objectField.ClrType))
+            {
+                GetOrCreateModel(objectField.ClrType);
+            }
         }
 
         foreach (var collectionField in collectionFields)
         {
-            GetOrCreateModel(collectionField.ElementType);
+            if (IsApplicationObjectType(collectionField.ElementType))
+            {
+                GetOrCreateModel(collectionField.ElementType);
+            }
         }
     }
 
@@ -264,7 +268,7 @@ internal sealed class CollectionSchemaCatalog
 
             if (TypeInspection.IsCollectionType(memberType, out var elementType) &&
                 elementType is not null &&
-                !TypeInspection.IsScalar(elementType))
+                IsApplicationObjectType(elementType))
             {
                 var collectionField = new CollectionFieldModel(
                     member,
@@ -285,9 +289,7 @@ internal sealed class CollectionSchemaCatalog
                 continue;
             }
 
-            if (!memberType.IsAbstract &&
-                memberType != typeof(object) &&
-                memberType.Namespace is not null)
+            if (IsApplicationObjectType(memberType))
             {
                 model.ObjectFields.Add(new ObjectReferenceFieldModel(member, graphQlName, memberType));
                 PopulateModel(GetOrCreateModel(memberType));
@@ -312,7 +314,7 @@ internal sealed class CollectionSchemaCatalog
         member switch
         {
             PropertyInfo property => property.PropertyType,
-            MethodInfo method => method.ReturnType,
+            MethodInfo method => TypeInspection.UnwrapTaskLike(method.ReturnType),
             _ => throw new NotSupportedException($"Unsupported member {member}.")
         };
 
@@ -320,6 +322,10 @@ internal sealed class CollectionSchemaCatalog
         type is { IsClass: true, IsAbstract: false }
         && (type.Name == "Query"
             || type.GetCustomAttribute<CollectionEnhancementModelAttribute>()?.IsQueryRoot == true);
+
+    private static bool IsApplicationObjectType(Type type) =>
+        TypeInspection.IsEnhancementObjectType(type)
+        && IsApplicationAssembly(type.Assembly);
 
     private static bool IsApplicationAssembly(Assembly assembly)
     {

@@ -7,7 +7,7 @@ internal static class FlatPathCatalog
     public static IReadOnlyList<FlatPathModel> Discover(CollectionFieldModel collectionField)
     {
         var paths = new List<(string Path, List<MemberInfo> Segments, Type TerminalType)>();
-        Discover(collectionField.ElementType, [], [], paths);
+        Discover(collectionField.ElementType, [], [], paths, new HashSet<Type>());
 
         var groupedByTerminalSegment = paths
             .GroupBy(path => GraphQlNaming.Singularize(GraphQlNaming.GetFieldName(path.Segments[^1])))
@@ -37,31 +37,37 @@ internal static class FlatPathCatalog
         Type currentType,
         List<string> pathSegments,
         List<MemberInfo> memberSegments,
-        List<(string Path, List<MemberInfo> Segments, Type TerminalType)> paths)
+        List<(string Path, List<MemberInfo> Segments, Type TerminalType)> paths,
+        ISet<Type> visitedTypes)
     {
+        if (!visitedTypes.Add(currentType))
+        {
+            return;
+        }
+
         foreach (var property in currentType.GetProperties(BindingFlags.Public | BindingFlags.Instance).Where(p => p.CanRead))
         {
             if (TypeInspection.IsCollectionType(property.PropertyType, out var elementType) &&
                 elementType is not null &&
-                !TypeInspection.IsScalar(elementType))
+                TypeInspection.IsEnhancementObjectType(elementType))
             {
                 var nextPathSegments = new List<string>(pathSegments) { GraphQlNaming.GetFieldName(property) };
                 var nextMemberSegments = new List<MemberInfo>(memberSegments) { property };
 
                 paths.Add((string.Join('.', nextPathSegments), nextMemberSegments, elementType));
-                Discover(elementType, nextPathSegments, nextMemberSegments, paths);
+                Discover(elementType, nextPathSegments, nextMemberSegments, paths, visitedTypes);
                 continue;
             }
 
-            if (!TypeInspection.IsScalar(property.PropertyType) &&
-                property.PropertyType != typeof(object) &&
-                property.PropertyType.Namespace is not null)
+            if (TypeInspection.IsEnhancementObjectType(property.PropertyType))
             {
                 var nextPathSegments = new List<string>(pathSegments) { GraphQlNaming.GetFieldName(property) };
                 var nextMemberSegments = new List<MemberInfo>(memberSegments) { property };
-                Discover(property.PropertyType, nextPathSegments, nextMemberSegments, paths);
+                Discover(property.PropertyType, nextPathSegments, nextMemberSegments, paths, visitedTypes);
             }
         }
+
+        visitedTypes.Remove(currentType);
     }
 
     private static string GetMinimalUniquePrefix(
@@ -90,6 +96,16 @@ internal static class FlatPathCatalog
             }
         }
 
-        return GraphQlNaming.ToCamelCase(string.Concat(names.Select(GraphQlNaming.ToPascalCase)));
+        return GraphQlNaming.ToCamelCase(string.Concat(
+            target.Segments.Select((member, index) =>
+            {
+                var fieldName = GraphQlNaming.GetFieldName(member);
+                if (index == target.Segments.Count - 1)
+                {
+                    fieldName = GraphQlNaming.Singularize(fieldName);
+                }
+
+                return GraphQlNaming.ToPascalCase(fieldName);
+            })));
     }
 }

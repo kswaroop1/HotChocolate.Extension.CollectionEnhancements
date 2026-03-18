@@ -97,7 +97,7 @@ public sealed class CollectionEnhancementSourceGenerator : IIncrementalGenerator
             var objectFields = ImmutableArray.CreateBuilder<FieldInfo>();
             var collectionFields = ImmutableArray.CreateBuilder<CollectionFieldInfo>();
             var members = isQueryRoot ? GetQueryMembers(type) : GetObjectMembers(type);
-            var graphQlTypeName = isQueryRoot ? "Query" : type.Name;
+            var graphQlTypeName = isQueryRoot ? "Query" : GetGraphQlTypeName(type);
 
             discoveredTypes[type] = new ObjectTypeInfo(
                 GetTypeName(type),
@@ -114,11 +114,11 @@ public sealed class CollectionEnhancementSourceGenerator : IIncrementalGenerator
 
                 if (TryGetCollectionElementType(memberType, out var elementType) &&
                     elementType is not null &&
-                    !IsScalar(elementType))
+                    IsEnhancementObjectType(elementType))
                 {
                     var elementNamedType = (INamedTypeSymbol)elementType;
                     var hostTypeName = graphQlTypeName;
-                    var elementTypeName = elementNamedType.Name;
+                    var elementTypeName = GetGraphQlTypeName(elementNamedType);
                     var typePrefix = hostTypeName + ToPascalCase(graphQlName);
                     var flatRowTypeName = typePrefix + "GeneratedFlatRow";
                     var flatPaths = DiscoverFlatPaths(elementNamedType);
@@ -150,7 +150,7 @@ public sealed class CollectionEnhancementSourceGenerator : IIncrementalGenerator
                 }
 
                 if (memberType is INamedTypeSymbol namedType &&
-                    IsObjectType(namedType))
+                    IsEnhancementObjectType(namedType))
                 {
                     objectFields.Add(new FieldInfo(
                         member.Name,
@@ -230,7 +230,7 @@ public sealed class CollectionEnhancementSourceGenerator : IIncrementalGenerator
 
                 if (TryGetCollectionElementType(propertyType, out var elementType) &&
                     elementType is INamedTypeSymbol elementNamedType &&
-                    !IsScalar(elementNamedType))
+                    IsEnhancementObjectType(elementNamedType))
                 {
                     var nextPathSegments = pathSegments.Add(GetFieldName(property));
                     var nextMemberSegments = memberSegments.Add(property);
@@ -242,7 +242,7 @@ public sealed class CollectionEnhancementSourceGenerator : IIncrementalGenerator
                     continue;
                 }
 
-                if (propertyType is INamedTypeSymbol objectNamedType && IsObjectType(objectNamedType))
+                if (propertyType is INamedTypeSymbol objectNamedType && IsEnhancementObjectType(objectNamedType))
                 {
                     DiscoverFlatPathsCore(
                         objectNamedType,
@@ -280,7 +280,16 @@ public sealed class CollectionEnhancementSourceGenerator : IIncrementalGenerator
                 }
             }
 
-            return ToCamelCase(string.Concat(names.Select(ToPascalCase)));
+            return ToCamelCase(string.Concat(target.MemberSegments.Select((member, index) =>
+            {
+                var fieldName = GetFieldName(member);
+                if (index == target.MemberSegments.Length - 1)
+                {
+                    fieldName = Singularize(fieldName);
+                }
+
+                return ToPascalCase(fieldName);
+            })));
         }
 
         private static IEnumerable<INamedTypeSymbol> EnumerateTypes(INamespaceSymbol namespaceSymbol)
@@ -389,7 +398,7 @@ public sealed class CollectionEnhancementSourceGenerator : IIncrementalGenerator
             member switch
             {
                 IPropertySymbol property => property.Type,
-                IMethodSymbol method => method.ReturnType,
+                IMethodSymbol method => UnwrapTaskLike(method.ReturnType),
                 _ => throw new NotSupportedException($"Unsupported member {member}.")
             };
 
@@ -417,11 +426,36 @@ public sealed class CollectionEnhancementSourceGenerator : IIncrementalGenerator
                 || actualType.ToDisplayString() is "System.DateOnly" or "System.DateTime" or "System.Guid";
         }
 
-        private static bool IsObjectType(INamedTypeSymbol type) =>
-            type is { IsAbstract: false }
-            && type.SpecialType == SpecialType.None
-            && type.Name != "Object"
-            && type.ContainingNamespace is not null;
+        private static bool IsEnhancementObjectType(ITypeSymbol type)
+        {
+            var actualType = UnwrapTaskLike(type);
+            return actualType is INamedTypeSymbol namedType
+                && !IsScalar(namedType)
+                && !TryGetCollectionElementType(namedType, out _)
+                && !IsNonGenericTaskLike(namedType)
+                && namedType is { IsAbstract: false }
+                && namedType.SpecialType == SpecialType.None
+                && namedType.Name != "Object"
+                && namedType.ContainingNamespace is not null
+                && IsApplicationType(namedType);
+        }
+
+        private static bool IsObjectType(INamedTypeSymbol type) => IsEnhancementObjectType(type);
+
+        private static bool IsApplicationType(INamedTypeSymbol type)
+        {
+            var assemblyName = type.ContainingAssembly?.Name ?? string.Empty;
+            if (assemblyName.StartsWith("HotChocolate.Extension.CollectionEnhancements", StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            return !assemblyName.StartsWith("System", StringComparison.Ordinal)
+                && !assemblyName.StartsWith("Microsoft", StringComparison.Ordinal)
+                && !assemblyName.StartsWith("HotChocolate", StringComparison.Ordinal)
+                && !assemblyName.StartsWith("xunit", StringComparison.OrdinalIgnoreCase)
+                && !assemblyName.StartsWith("coverlet", StringComparison.OrdinalIgnoreCase);
+        }
 
         private static bool TryGetCollectionElementType(ITypeSymbol type, out ITypeSymbol? elementType)
         {
@@ -439,7 +473,7 @@ public sealed class CollectionEnhancementSourceGenerator : IIncrementalGenerator
 
             if (type is INamedTypeSymbol namedType &&
                 namedType.IsGenericType &&
-                namedType.ConstructedFrom.ToDisplayString() == "System.Linq.IQueryable<T>")
+                IsNamedType(namedType.ConstructedFrom, "System.Linq", "IQueryable"))
             {
                 elementType = namedType.TypeArguments[0];
                 return true;
@@ -447,7 +481,7 @@ public sealed class CollectionEnhancementSourceGenerator : IIncrementalGenerator
 
             var enumerableInterface = type.AllInterfaces.FirstOrDefault(candidate =>
                 candidate is INamedTypeSymbol { IsGenericType: true } interfaceType &&
-                interfaceType.ConstructedFrom.ToDisplayString() == "System.Collections.Generic.IEnumerable<T>");
+                IsNamedType(interfaceType.ConstructedFrom, "System.Collections.Generic", "IEnumerable"));
 
             if (enumerableInterface is INamedTypeSymbol enumerableNamedType)
             {
@@ -464,6 +498,28 @@ public sealed class CollectionEnhancementSourceGenerator : IIncrementalGenerator
                 ? nullableType.TypeArguments[0]
                 : type;
 
+        private static ITypeSymbol UnwrapTaskLike(ITypeSymbol type)
+        {
+            var actualType = UnwrapNullable(type);
+            return actualType switch
+            {
+                INamedTypeSymbol { IsGenericType: true } namedType
+                    when IsNamedType(namedType.ConstructedFrom, "System.Threading.Tasks", "Task")
+                        || IsNamedType(namedType.ConstructedFrom, "System.Threading.Tasks", "ValueTask") =>
+                    namedType.TypeArguments[0],
+                _ => actualType
+            };
+        }
+
+        private static bool IsNonGenericTaskLike(ITypeSymbol type) =>
+            type is INamedTypeSymbol namedType
+            && ((namedType.Name == "Task" || namedType.Name == "ValueTask")
+                && namedType.ContainingNamespace.ToDisplayString() == "System.Threading.Tasks");
+
+        private static bool IsNamedType(INamedTypeSymbol type, string @namespace, string name) =>
+            type.Name == name
+            && type.ContainingNamespace.ToDisplayString() == @namespace;
+
         private static string GetFieldName(ISymbol member) =>
             member switch
             {
@@ -472,13 +528,44 @@ public sealed class CollectionEnhancementSourceGenerator : IIncrementalGenerator
                 _ => ToCamelCase(member.Name)
             };
 
+        private static string GetGraphQlTypeName(ITypeSymbol type) =>
+            type switch
+            {
+                IArrayTypeSymbol arrayType => GetGraphQlTypeName(arrayType.ElementType) + "Array",
+                INamedTypeSymbol namedType => GetGraphQlTypeName(namedType),
+                _ => type.Name
+            };
+
+        private static string GetGraphQlTypeName(INamedTypeSymbol type)
+        {
+            var builder = new StringBuilder();
+            AppendGraphQlTypeName(builder, type);
+            return builder.ToString();
+        }
+
+        private static void AppendGraphQlTypeName(StringBuilder builder, INamedTypeSymbol type)
+        {
+            if (type.ContainingType is not null)
+            {
+                AppendGraphQlTypeName(builder, type.ContainingType);
+            }
+
+            builder.Append(type.MetadataName.Split('`')[0]);
+
+            foreach (var typeArgument in type.TypeArguments)
+            {
+                builder.Append(GetGraphQlTypeName(typeArgument));
+            }
+        }
+
         private static string GetTypeName(ITypeSymbol type) =>
-            type.ToDisplayString(FullyQualifiedTypeFormat);
+            UnwrapTaskLike(type).ToDisplayString(FullyQualifiedTypeFormat);
 
         private static string GetFlatRowPropertyTypeName(ITypeSymbol type)
         {
-            var typeName = GetTypeName(type);
-            return type.IsReferenceType
+            var actualType = UnwrapTaskLike(type);
+            var typeName = GetTypeName(actualType);
+            return actualType.IsReferenceType
                 ? typeName + "?"
                 : typeName;
         }

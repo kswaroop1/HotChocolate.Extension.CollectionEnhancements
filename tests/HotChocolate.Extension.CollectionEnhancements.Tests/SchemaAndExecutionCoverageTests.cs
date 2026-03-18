@@ -8,12 +8,14 @@ using HotChocolate;
 using HotChocolate.AspNetCore;
 using HotChocolate.AspNetCore.Serialization;
 using HotChocolate.Execution;
+using HotChocolate.Extension.CollectionEnhancements;
 using HotChocolate.Extension.CollectionEnhancements.Execution;
 using HotChocolate.Extension.CollectionEnhancements.Metadata;
 using HotChocolate.Extension.CollectionEnhancements.Schema;
 using HotChocolate.Extension.CollectionEnhancements.Tests.TestData;
 using HotChocolate.Extension.CollectionEnhancements.Tests.TestServer;
 using HotChocolate.Language;
+using HotChocolate.Types;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -1195,6 +1197,7 @@ public sealed class SchemaAndExecutionCoverageTests
     {
         var registrarType = typeof(CollectionEnhancementTypeRegistrar);
         var catalog = CollectionSchemaCatalog.CreateDefault();
+        var registrar = new CollectionEnhancementTypeRegistrar(catalog);
         var ownerModel = catalog.TryGetObjectType(typeof(ProjectionFriendlyOwner));
         Assert.NotNull(ownerModel);
         var rowsField = ownerModel.FindCollection("rows");
@@ -1223,8 +1226,8 @@ public sealed class SchemaAndExecutionCoverageTests
                     .Type("[ProjectionFriendlyRow!]!")
                     .Resolve(_ => Array.Empty<ProjectionFriendlyRow>());
 
-                ReflectionTestSupport.InvokeStatic(
-                    registrarType,
+                ReflectionTestSupport.InvokeInstance(
+                    registrar,
                     "ConfigureCollectionField",
                     field,
                     rowsField);
@@ -1243,6 +1246,97 @@ public sealed class SchemaAndExecutionCoverageTests
             registrarType,
             "CanUseProjection",
             typeof(Security))!);
+    }
+
+    [Fact]
+    public void Registrar_ShouldSuppressUnsupportedBaseOrderAndGrouping_ForScalarlessCollectionElements()
+    {
+        var catalog = new CollectionSchemaCatalog();
+        var model = Assert.IsType<ObjectTypeModel>(
+            ReflectionTestSupport.InvokeInstance(catalog, "GetOrCreateModel", typeof(SchemaEdgeQuery), true)!);
+        ReflectionTestSupport.InvokeInstance(catalog, "PopulateModel", model);
+        var registrar = new CollectionEnhancementTypeRegistrar(catalog);
+        Assert.NotNull(model);
+        var rowsField = model.FindCollection("scalarlessRows");
+        Assert.NotNull(rowsField);
+
+        Assert.False((bool)ReflectionTestSupport.InvokeInstance(registrar, "SupportsOrdering", rowsField, false)!);
+        Assert.False((bool)ReflectionTestSupport.InvokeInstance(registrar, "SupportsGrouping", rowsField, false)!);
+        Assert.True((bool)ReflectionTestSupport.InvokeInstance(registrar, "SupportsOrdering", rowsField, true)!);
+        Assert.True((bool)ReflectionTestSupport.InvokeInstance(registrar, "SupportsGrouping", rowsField, true)!);
+        Assert.True((bool)ReflectionTestSupport.InvokeInstance(registrar, "SupportsFlatRows", rowsField)!);
+
+        var queryType = SchemaBuilder.New()
+            .AddProjections()
+            .AddType<HotChocolate.CostAnalysis.Types.CostDirectiveType>()
+            .AddType<HotChocolate.CostAnalysis.Types.ListSizeDirectiveType>()
+            .AddType<ScalarlessSchemaRow>()
+            .AddType(new InputObjectType(descriptor =>
+            {
+                descriptor.Name(rowsField.FilterInputName);
+                descriptor.Field("childRows").Type<StringType>();
+            }))
+            .AddQueryType(descriptor =>
+            {
+                descriptor.Name("Query");
+                var field = descriptor.Field("rows")
+                    .Type("[ScalarlessSchemaRow!]!")
+                    .Resolve(_ => Array.Empty<ScalarlessSchemaRow>());
+
+                ReflectionTestSupport.InvokeInstance(registrar, "ConfigureCollectionField", field, rowsField);
+            })
+            .Create()
+            .Print();
+
+        Assert.Contains("rows(where:", queryType, StringComparison.Ordinal);
+        Assert.DoesNotContain("order: [ScalarlessSchemaRowSortInput!]", queryType, StringComparison.Ordinal);
+        Assert.DoesNotContain("ScalarlessSchemaRowGroupByInput", queryType, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Registrar_ShouldSuppressFlatSurfaces_WhenNoExpandPathsExist()
+    {
+        var catalog = new CollectionSchemaCatalog();
+        var model = Assert.IsType<ObjectTypeModel>(
+            ReflectionTestSupport.InvokeInstance(catalog, "GetOrCreateModel", typeof(SchemaEdgeQuery), true)!);
+        ReflectionTestSupport.InvokeInstance(catalog, "PopulateModel", model);
+        var registrar = new CollectionEnhancementTypeRegistrar(catalog);
+        Assert.NotNull(model);
+        var rowsField = model.FindCollection("noExpandRows");
+        Assert.NotNull(rowsField);
+
+        Assert.False((bool)ReflectionTestSupport.InvokeInstance(registrar, "SupportsFlatExpansion", rowsField)!);
+        Assert.False((bool)ReflectionTestSupport.InvokeInstance(registrar, "SupportsFlatRows", rowsField)!);
+        Assert.False((bool)ReflectionTestSupport.InvokeInstance(registrar, "SupportsOrdering", rowsField, true)!);
+        Assert.False((bool)ReflectionTestSupport.InvokeInstance(registrar, "SupportsGrouping", rowsField, true)!);
+
+        var builder = new ServiceCollection()
+            .AddGraphQLServer()
+            .AddQueryType(descriptor => descriptor.Name("Query").Field("ping").Type<StringType>().Resolve("pong"));
+        ReflectionTestSupport.InvokeInstance(registrar, "RegisterFlatTypes", builder, rowsField);
+
+        var registrarType = typeof(CollectionEnhancementTypeRegistrar);
+        var flatScalarFieldType = registrarType.GetNestedType("FlatScalarFieldDefinition", BindingFlags.NonPublic)!;
+        var emptyFields = Array.CreateInstance(flatScalarFieldType, 0);
+        ReflectionTestSupport.InvokeStatic(registrarType, "RegisterGroupByEnum", builder, "UnusedEmptyGroupBy", emptyFields);
+    }
+
+    [Fact]
+    public void Registrar_ShouldDisableFlatOrdering_WhenExpandPathsExistWithoutScalarFields()
+    {
+        var catalog = new CollectionSchemaCatalog();
+        var model = Assert.IsType<ObjectTypeModel>(
+            ReflectionTestSupport.InvokeInstance(catalog, "GetOrCreateModel", typeof(ExpandOnlyQuery), true)!);
+        ReflectionTestSupport.InvokeInstance(catalog, "PopulateModel", model);
+        var registrar = new CollectionEnhancementTypeRegistrar(catalog);
+        Assert.NotNull(model);
+        var rowsField = model.FindCollection("rows");
+        Assert.NotNull(rowsField);
+
+        Assert.True((bool)ReflectionTestSupport.InvokeInstance(registrar, "SupportsFlatExpansion", rowsField)!);
+        Assert.False((bool)ReflectionTestSupport.InvokeInstance(registrar, "SupportsOrdering", rowsField, true)!);
+        Assert.False((bool)ReflectionTestSupport.InvokeInstance(registrar, "SupportsGrouping", rowsField, true)!);
+        Assert.False((bool)ReflectionTestSupport.InvokeInstance(registrar, "SupportsFlatRows", rowsField)!);
     }
 
     [Fact]
@@ -1398,6 +1492,45 @@ public sealed class SchemaAndExecutionCoverageTests
             new() { Id = 1, Name = "Row" }
         ];
     }
+
+    public sealed class SchemaEdgeQuery
+    {
+        public ScalarlessSchemaRow[] GetScalarlessRows() =>
+        [
+            new() { ChildRows = [new ScalarlessSchemaChild(1)] }
+        ];
+
+        public NoExpandSchemaRow[] GetNoExpandRows() =>
+        [
+            new() { Id = 1, Name = "row" }
+        ];
+    }
+
+    public sealed class ExpandOnlyQuery
+    {
+        public ExpandOnlyRow[] GetRows() => [new() { Children = [new ExpandOnlyLeaf()] }];
+    }
+
+    public sealed class ScalarlessSchemaRow
+    {
+        public ScalarlessSchemaChild[] ChildRows { get; init; } = [];
+    }
+
+    public sealed record ScalarlessSchemaChild(int Value);
+
+    public sealed class NoExpandSchemaRow
+    {
+        public int Id { get; init; }
+
+        public string Name { get; init; } = string.Empty;
+    }
+
+    public sealed class ExpandOnlyRow
+    {
+        public ExpandOnlyLeaf[] Children { get; init; } = [];
+    }
+
+    public sealed class ExpandOnlyLeaf;
 
     public sealed class ProjectionFriendlyRow
     {

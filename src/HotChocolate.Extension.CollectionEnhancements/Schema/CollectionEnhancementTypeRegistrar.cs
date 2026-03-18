@@ -135,8 +135,11 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
                 descriptor.Field(collectionField.AggregateFieldName)
                     .Type(GraphQlTypeReferenceHelper.Parse(collectionField.AggregateCriteriaInputName));
 
-                descriptor.Field(collectionField.GroupFieldName)
-                    .Type(GraphQlTypeReferenceHelper.Parse(collectionField.GroupCriteriaInputName));
+                if (SupportsGrouping(collectionField, isFlat: false))
+                {
+                    descriptor.Field(collectionField.GroupFieldName)
+                        .Type(GraphQlTypeReferenceHelper.Parse(collectionField.GroupCriteriaInputName));
+                }
             }
         }));
     }
@@ -162,10 +165,18 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
     private void RegisterCollectionTypes(IRequestExecutorBuilder builder, CollectionFieldModel collectionField)
     {
         RegisterAggregateCriteriaInputs(builder, collectionField);
-        RegisterGroupCriteriaInputs(builder, collectionField);
         RegisterAggregateResultTypes(builder, collectionField, isFlat: false);
-        RegisterGroupResultTypes(builder, collectionField, isFlat: false);
-        RegisterFlatTypes(builder, collectionField);
+
+        if (SupportsGrouping(collectionField, isFlat: false))
+        {
+            RegisterGroupCriteriaInputs(builder, collectionField);
+            RegisterGroupResultTypes(builder, collectionField, isFlat: false);
+        }
+
+        if (SupportsFlatExpansion(collectionField))
+        {
+            RegisterFlatTypes(builder, collectionField);
+        }
     }
 
     private void RegisterAggregateCriteriaInputs(IRequestExecutorBuilder builder, CollectionFieldModel collectionField)
@@ -180,7 +191,8 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
 
     private void RegisterGroupCriteriaInputs(IRequestExecutorBuilder builder, CollectionFieldModel collectionField)
     {
-        RegisterGroupByEnum(builder, collectionField.GroupByEnumName, GetBaseScalarFields(collectionField));
+        var scalarFields = GetBaseScalarFields(collectionField);
+        RegisterGroupByEnum(builder, collectionField.GroupByEnumName, scalarFields);
 
         builder.AddType(new InputObjectType(descriptor =>
         {
@@ -321,19 +333,11 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
         var scalarFields = GetFlatScalarFields(collectionField);
 
         RegisterAggregateResultTypes(builder, collectionField, isFlat: true);
-        RegisterGroupResultTypes(builder, collectionField, isFlat: true);
 
-        builder.AddType(new ObjectType(descriptor =>
+        if (SupportsGrouping(collectionField, isFlat: true))
         {
-            descriptor.Name(collectionField.FlatRowName);
-
-            foreach (var scalarField in scalarFields)
-            {
-                descriptor.Field(scalarField.FieldName)
-                    .Type(GraphQlTypeReferenceHelper.Parse(GraphQlTypeReferenceHelper.GetOptionalScalarTypeSyntax(scalarField.ClrType)))
-                    .Resolve(context => context.Parent<IReadOnlyDictionary<string, object?>>().GetValueOrDefault(scalarField.FieldName));
-            }
-        }));
+            RegisterGroupResultTypes(builder, collectionField, isFlat: true);
+        }
 
         builder.AddType(new InputObjectType(descriptor =>
         {
@@ -346,6 +350,23 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
             {
                 descriptor.Field(scalarField.FieldName)
                     .Type(GraphQlTypeReferenceHelper.Parse(GraphQlTypeReferenceHelper.GetOperationFilterTypeName(scalarField.ClrType)));
+            }
+        }));
+
+        if (!SupportsFlatRows(collectionField))
+        {
+            return;
+        }
+
+        builder.AddType(new ObjectType(descriptor =>
+        {
+            descriptor.Name(collectionField.FlatRowName);
+
+            foreach (var scalarField in scalarFields)
+            {
+                descriptor.Field(scalarField.FieldName)
+                    .Type(GraphQlTypeReferenceHelper.Parse(GraphQlTypeReferenceHelper.GetOptionalScalarTypeSyntax(scalarField.ClrType)))
+                    .Resolve(context => context.Parent<IReadOnlyDictionary<string, object?>>().GetValueOrDefault(scalarField.FieldName));
             }
         }));
 
@@ -362,6 +383,11 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
 
     private static void RegisterGroupByEnum(IRequestExecutorBuilder builder, string name, IReadOnlyList<FlatScalarFieldDefinition> fields)
     {
+        if (fields.Count == 0)
+        {
+            return;
+        }
+
         builder.AddType(new EnumType(descriptor =>
         {
             descriptor.Name(name);
@@ -392,18 +418,33 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
             {
                 ConfigureCollectionField(descriptor.Field(collectionField.GraphQlName), collectionField);
                 ConfigureAggregateField(CreateSiblingField<THost>(descriptor, collectionField.Member, collectionField.AggregateFieldName), collectionField, isFlat: false);
-                ConfigureGroupField(CreateSiblingField<THost>(descriptor, collectionField.Member, collectionField.GroupFieldName), collectionField, isFlat: false);
-                ConfigureFlatField(CreateSiblingField<THost>(descriptor, collectionField.Member, collectionField.FlatFieldName), collectionField);
-                ConfigureAggregateField(CreateSiblingField<THost>(descriptor, collectionField.Member, collectionField.FlatAggregateFieldName), collectionField, isFlat: true);
-                ConfigureGroupField(CreateSiblingField<THost>(descriptor, collectionField.Member, collectionField.FlatGroupFieldName), collectionField, isFlat: true);
+
+                if (SupportsGrouping(collectionField, isFlat: false))
+                {
+                    ConfigureGroupField(CreateSiblingField<THost>(descriptor, collectionField.Member, collectionField.GroupFieldName), collectionField, isFlat: false);
+                }
+
+                if (SupportsFlatRows(collectionField))
+                {
+                    ConfigureFlatField(CreateSiblingField<THost>(descriptor, collectionField.Member, collectionField.FlatFieldName), collectionField);
+                }
+
+                if (SupportsFlatExpansion(collectionField))
+                {
+                    ConfigureAggregateField(CreateSiblingField<THost>(descriptor, collectionField.Member, collectionField.FlatAggregateFieldName), collectionField, isFlat: true);
+                }
+
+                if (SupportsGrouping(collectionField, isFlat: true))
+                {
+                    ConfigureGroupField(CreateSiblingField<THost>(descriptor, collectionField.Member, collectionField.FlatGroupFieldName), collectionField, isFlat: true);
+                }
             }
         });
     }
 
-    private static void ConfigureCollectionField(IObjectFieldDescriptor field, CollectionFieldModel collectionField)
+    private void ConfigureCollectionField(IObjectFieldDescriptor field, CollectionFieldModel collectionField)
     {
         field.Argument("where", argument => argument.Type(GraphQlTypeReferenceHelper.Parse(collectionField.FilterInputName)).Cost(8))
-            .Argument("order", argument => argument.Type(GraphQlTypeReferenceHelper.Parse($"[{collectionField.SortInputName}!]")).Cost(6))
             .Argument("offset", argument => argument.Type<IntType>().Cost(2))
             .Argument("limit", argument => argument.Type<IntType>().Cost(2))
             .Cost(6)
@@ -413,6 +454,11 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
                 sizedFields: null,
                 requireOneSlicingArgument: false,
                 slicingArgumentDefaultValue: 100);
+
+        if (SupportsOrdering(collectionField, isFlat: false))
+        {
+            field.Argument("order", argument => argument.Type(GraphQlTypeReferenceHelper.Parse($"[{collectionField.SortInputName}!]")).Cost(6));
+        }
 
         if (CanUseProjection(collectionField.ElementType))
         {
@@ -434,7 +480,7 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
         });
     }
 
-    private static void ConfigureAggregateField(IObjectFieldDescriptor field, CollectionFieldModel collectionField, bool isFlat)
+    private void ConfigureAggregateField(IObjectFieldDescriptor field, CollectionFieldModel collectionField, bool isFlat)
     {
         field.Argument("where", argument => argument.Type(GraphQlTypeReferenceHelper.Parse(isFlat ? collectionField.FlatRowFilterInputName : collectionField.FilterInputName)).Cost(8))
             .Argument("having", argument => argument.Type(GraphQlTypeReferenceHelper.Parse(isFlat ? collectionField.FlatAggregateHavingInputName : collectionField.AggregateHavingInputName)).Cost(8))
@@ -524,11 +570,10 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
         });
     }
 
-    private static void ConfigureFlatField(IObjectFieldDescriptor field, CollectionFieldModel collectionField)
+    private void ConfigureFlatField(IObjectFieldDescriptor field, CollectionFieldModel collectionField)
     {
         field.Argument("expand", argument => argument.Type(GraphQlTypeReferenceHelper.Parse("[String!]!")).Cost(15))
             .Argument("where", argument => argument.Type(GraphQlTypeReferenceHelper.Parse(collectionField.FlatRowFilterInputName)).Cost(8))
-            .Argument("order", argument => argument.Type(GraphQlTypeReferenceHelper.Parse($"[{collectionField.FlatRowSortInputName}!]")).Cost(6))
             .Argument("offset", argument => argument.Type<IntType>().Cost(2))
             .Argument("limit", argument => argument.Type<IntType>().Cost(2))
             .Argument("maxDepth", argument => argument.Type<IntType>().Cost(4))
@@ -540,6 +585,11 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
                 sizedFields: null,
                 requireOneSlicingArgument: false,
                 slicingArgumentDefaultValue: 100);
+
+        if (SupportsOrdering(collectionField, isFlat: true))
+        {
+            field.Argument("order", argument => argument.Type(GraphQlTypeReferenceHelper.Parse($"[{collectionField.FlatRowSortInputName}!]")).Cost(6));
+        }
 
         field.Use(next => async context =>
         {
@@ -591,9 +641,12 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
         bool isFlat,
         bool includeKey)
     {
-        descriptor.Field("countDistinct")
-            .Type(GraphQlTypeReferenceHelper.Parse(GetOperatorResultTypeName(collectionField, isFlat, AggregateOperator.CountDistinct)))
-            .Resolve(context => new AggregateProjection(GetSelection(context), AggregateOperator.CountDistinct, null, null));
+        if (GetApplicableFields(scalarFields, AggregateOperator.CountDistinct).Count > 0)
+        {
+            descriptor.Field("countDistinct")
+                .Type(GraphQlTypeReferenceHelper.Parse(GetOperatorResultTypeName(collectionField, isFlat, AggregateOperator.CountDistinct)))
+                .Resolve(context => new AggregateProjection(GetSelection(context), AggregateOperator.CountDistinct, null, null));
+        }
 
         ConfigureProjectionField(descriptor, "sum", collectionField, scalarFields, isFlat, AggregateOperator.Sum);
         ConfigureProjectionField(descriptor, "avg", collectionField, scalarFields, isFlat, AggregateOperator.Avg);
@@ -1026,6 +1079,27 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
 
         public bool IsString => TypeInspection.IsStringLike(ClrType);
     }
+
+    private bool SupportsOrdering(CollectionFieldModel collectionField, bool isFlat)
+    {
+        if (isFlat && !SupportsFlatExpansion(collectionField))
+        {
+            return false;
+        }
+
+        return (isFlat ? GetFlatScalarFields(collectionField) : GetBaseScalarFields(collectionField)).Count > 0;
+    }
+
+    private bool SupportsGrouping(CollectionFieldModel collectionField, bool isFlat) =>
+        (!isFlat || SupportsFlatExpansion(collectionField))
+        && (isFlat ? GetFlatScalarFields(collectionField) : GetBaseScalarFields(collectionField)).Count > 0;
+
+    private bool SupportsFlatRows(CollectionFieldModel collectionField) =>
+        SupportsFlatExpansion(collectionField)
+        && GetFlatScalarFields(collectionField).Count > 0;
+
+    private bool SupportsFlatExpansion(CollectionFieldModel collectionField) =>
+        FlatRowShapeCache.GetOrCreate(collectionField).Paths.Count > 0;
 
     private static IObjectFieldDescriptor CreateSiblingField<THost>(
         IObjectTypeDescriptor<THost> descriptor,
