@@ -1,7 +1,11 @@
 using System.Reflection;
+using HotChocolate.Execution;
 using HotChocolate.Extension.CollectionEnhancements.Generated;
 using HotChocolate.Extension.CollectionEnhancements.Metadata;
+using HotChocolate.Extension.CollectionEnhancements.Execution;
+using HotChocolate.Extension.CollectionEnhancements.Schema;
 using HotChocolate.Extension.CollectionEnhancements.Tests.TestServer;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace HotChocolate.Extension.CollectionEnhancements.Tests;
 
@@ -183,6 +187,108 @@ public sealed class GeneratedProviderCoverageTests
     }
 
     [Fact]
+    public void CollectionSchemaCatalog_ShouldNotDuplicateGeneratedModels_WhenReflectionPopulationRunsAfterGeneratedPopulation()
+    {
+        var catalog = new CollectionSchemaCatalog();
+        var generatedType = CreateGeneratedObjectType();
+
+        var model = Assert.IsType<ObjectTypeModel>(
+            ReflectionTestSupport.InvokeInstance(
+                catalog,
+                "GetOrCreateModel",
+                typeof(GeneratedProviderCoverageHost),
+                "GeneratedProviderCoverageHost",
+                false)!);
+
+        ReflectionTestSupport.InvokeInstance(catalog, "TryPopulateGeneratedModel", generatedType);
+        ReflectionTestSupport.InvokeInstance(catalog, "PopulateModel", model);
+
+        Assert.NotNull(model);
+        Assert.Single(model.ScalarFields);
+        Assert.Single(model.ObjectFields);
+        Assert.Single(model.CollectionFields);
+
+        var collection = Assert.Single(model.CollectionFields);
+        Assert.Equal(typeof(GeneratedProviderCoverageFlatRow), collection.GeneratedFlatRowClrType);
+    }
+
+    [Fact]
+    public async Task Registrar_ShouldBuildSchema_AndExecute_For_GeneratedPopulatedModels_WhenReflectionPopulationIsSkipped()
+    {
+        var catalog = new CollectionSchemaCatalog();
+        var queryModel = Assert.IsType<ObjectTypeModel>(
+            ReflectionTestSupport.InvokeInstance(catalog, "GetOrCreateModel", typeof(GeneratedProviderRuntimeQuery), true)!);
+        ReflectionTestSupport.InvokeInstance(catalog, "PopulateModel", queryModel);
+
+        var generatedType = CreateRuntimeSchemaGeneratedObjectType();
+        var hostModel = Assert.IsType<ObjectTypeModel>(
+            ReflectionTestSupport.InvokeInstance(
+                catalog,
+                "GetOrCreateModel",
+                typeof(GeneratedProviderRuntimeHost),
+                "GeneratedProviderRuntimeHost",
+                false)!);
+
+        ReflectionTestSupport.InvokeInstance(catalog, "TryPopulateGeneratedModel", generatedType);
+        ReflectionTestSupport.InvokeInstance(catalog, "PopulateModel", hostModel);
+
+        var services = new ServiceCollection();
+        var options = new CollectionEnhancementOptions();
+        services.AddSingleton(catalog);
+        services.AddSingleton(options);
+        services.AddSingleton(sp => new CollectionExecutionEngine(
+            sp.GetRequiredService<CollectionSchemaCatalog>(),
+            sp.GetRequiredService<CollectionEnhancementOptions>()));
+
+        var builder = services
+            .AddGraphQLServer()
+            .AddQueryType<GeneratedProviderRuntimeQuery>(descriptor => descriptor.Name("Query"))
+            .AddType<GeneratedProviderRuntimeHost>()
+            .AddType<GeneratedProviderRuntimeChild>()
+            .AddType<GeneratedProviderRuntimeLeaf>()
+            .AddCostAnalyzer()
+            .ModifyCostOptions(costOptions =>
+            {
+                costOptions.MaxFieldCost = 500_000;
+                costOptions.MaxTypeCost = 500_000;
+                costOptions.EnforceCostLimits = false;
+                costOptions.ApplyCostDefaults = true;
+                costOptions.ApplySlicingArgumentDefaultValue = true;
+            })
+            .AddProjections()
+            .AddFiltering()
+            .AddSorting();
+        builder.AddHttpRequestInterceptor<CollectionEnhancementHttpRequestInterceptor>();
+        services.AddHttpResponseFormatter<CollectionEnhancementHttpResponseFormatter>();
+
+        new CollectionEnhancementTypeRegistrar(catalog).Register(builder);
+
+        await using var serviceProvider = services.BuildServiceProvider();
+        var executor = await serviceProvider.GetRequiredService<IRequestExecutorResolver>().GetRequestExecutorAsync();
+        var result = await executor.ExecuteQueryResultAsync("""
+            query {
+              generatedHosts {
+                id
+                child {
+                  name
+                }
+                items {
+                  value
+                }
+              }
+            }
+            """);
+
+        using var json = result.AssertSuccessfulJson();
+        var row = json.RootElement
+            .GetProperty("data")
+            .GetProperty("generatedHosts")[0];
+        Assert.Equal(7, row.GetProperty("id").GetInt32());
+        Assert.Equal("child", row.GetProperty("child").GetProperty("name").GetString());
+        Assert.Equal(1, row.GetProperty("items")[0].GetProperty("value").GetInt32());
+    }
+
+    [Fact]
     public void GeneratedModelContracts_ShouldExposeRecordValues()
     {
         var scalar = new CollectionEnhancementGeneratedScalarField(
@@ -279,13 +385,45 @@ public sealed class GeneratedProviderCoverageTests
                     [])
             ]);
 
-    private sealed record GeneratedProviderCoverageChild(string Name);
+    private static CollectionEnhancementGeneratedObjectType CreateRuntimeSchemaGeneratedObjectType() =>
+        new(
+            typeof(GeneratedProviderRuntimeHost),
+            "GeneratedProviderRuntimeHost",
+            false,
+            [
+                new CollectionEnhancementGeneratedScalarField(
+                    nameof(GeneratedProviderRuntimeHost.Id),
+                    CollectionEnhancementGeneratedMemberKind.Property,
+                    "id",
+                    typeof(int))
+            ],
+            [
+                new CollectionEnhancementGeneratedObjectField(
+                    nameof(GeneratedProviderRuntimeHost.Child),
+                    CollectionEnhancementGeneratedMemberKind.Property,
+                    "child",
+                    typeof(GeneratedProviderRuntimeChild))
+            ],
+            [
+                new CollectionEnhancementGeneratedCollectionField(
+                    nameof(GeneratedProviderRuntimeHost.GetItems),
+                    CollectionEnhancementGeneratedMemberKind.Method,
+                    "items",
+                    typeof(IReadOnlyList<GeneratedProviderRuntimeLeaf>),
+                    typeof(GeneratedProviderRuntimeLeaf),
+                    "GeneratedProviderRuntimeHost",
+                    "GeneratedProviderRuntimeLeaf",
+                    typeof(GeneratedProviderRuntimeFlatRow),
+                    [])
+            ]);
 
-    private sealed record GeneratedProviderCoverageLeaf(int Value);
+    public sealed record GeneratedProviderCoverageChild(string Name);
 
-    private sealed record GeneratedProviderCoverageFlatRow;
+    public sealed record GeneratedProviderCoverageLeaf(int Value);
 
-    private sealed class GeneratedProviderCoverageHost
+    public sealed record GeneratedProviderCoverageFlatRow;
+
+    public sealed class GeneratedProviderCoverageHost
     {
         public int Id => 7;
 
@@ -295,6 +433,12 @@ public sealed class GeneratedProviderCoverageTests
             [new(1)];
     }
 
+    public sealed class GeneratedProviderSchemaQuery
+    {
+        public GeneratedProviderCoverageHost[] GetGeneratedHosts() =>
+            [new()];
+    }
+
     private sealed class ThrowingGeneratedModelProvider : ICollectionEnhancementGeneratedModelProvider
     {
         public ThrowingGeneratedModelProvider() =>
@@ -302,4 +446,26 @@ public sealed class GeneratedProviderCoverageTests
 
         public IReadOnlyList<CollectionEnhancementGeneratedObjectType> GetObjectTypes() => [];
     }
+}
+
+public sealed record GeneratedProviderRuntimeChild(string Name);
+
+public sealed record GeneratedProviderRuntimeLeaf(int Value);
+
+public sealed record GeneratedProviderRuntimeFlatRow;
+
+public sealed class GeneratedProviderRuntimeHost
+{
+    public int Id => 7;
+
+    public GeneratedProviderRuntimeChild Child => new("child");
+
+    public IReadOnlyList<GeneratedProviderRuntimeLeaf> GetItems() =>
+        [new(1)];
+}
+
+public sealed class GeneratedProviderRuntimeQuery
+{
+    public GeneratedProviderRuntimeHost[] GetGeneratedHosts() =>
+        [new()];
 }
