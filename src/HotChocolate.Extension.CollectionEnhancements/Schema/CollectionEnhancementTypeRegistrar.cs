@@ -23,8 +23,12 @@ internal sealed class CollectionEnhancementTypeRegistrar(CollectionSchemaCatalog
 
         foreach (var objectType in _catalog.ObjectTypes)
         {
-            RegisterObjectFilterType(builder, objectType);
-            RegisterObjectSortType(builder, objectType);
+            if (!objectType.IsQueryRoot)
+            {
+                RegisterObjectFilterType(builder, objectType);
+                RegisterObjectSortType(builder, objectType);
+            }
+
             RegisterObjectExtension(builder, objectType);
 
             foreach (var collectionField in objectType.CollectionFields)

@@ -69,6 +69,34 @@ internal static class GraphQlNaming
         return builder.ToString();
     }
 
+    public static IReadOnlyList<string> GetTypeNameCandidates(Type type)
+    {
+        var actualType = TypeInspection.UnwrapTaskLike(type);
+        var baseName = GetTypeName(actualType);
+        var candidates = new List<string> { baseName };
+        var prefix = string.Empty;
+
+        foreach (var sanitizedSegment in (actualType.Namespace ?? string.Empty)
+                     .Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                     .Reverse()
+                     .Select(SanitizeTypeNameSegment)
+                     .Where(segment => !string.IsNullOrEmpty(segment)))
+        {
+            prefix = sanitizedSegment + prefix;
+            candidates.Add(prefix + baseName);
+        }
+
+        var assemblySegment = SanitizeTypeNameSegment(actualType.Assembly.GetName().Name!);
+        if (!string.IsNullOrEmpty(assemblySegment))
+        {
+            candidates.Add(assemblySegment + baseName);
+        }
+
+        return candidates
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+    }
+
     public static string ToCamelCase(string value)
     {
         if (string.IsNullOrEmpty(value))
@@ -117,5 +145,30 @@ internal static class GraphQlNaming
         value.StartsWith("Get", StringComparison.Ordinal) && value.Length > 3
             ? value[3..]
             : value;
+
+    private static string SanitizeTypeNameSegment(string value)
+    {
+        var builder = new StringBuilder(value.Length);
+
+        foreach (var character in value)
+        {
+            if (char.IsLetterOrDigit(character))
+            {
+                builder.Append(character);
+            }
+        }
+
+        if (builder.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        var sanitized = builder.ToString();
+        sanitized = char.ToUpperInvariant(sanitized[0]) + sanitized[1..];
+
+        return char.IsDigit(sanitized[0])
+            ? "N" + sanitized
+            : sanitized;
+    }
 
 }

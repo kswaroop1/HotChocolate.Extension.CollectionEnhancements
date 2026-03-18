@@ -101,7 +101,10 @@ internal sealed class CollectionSchemaCatalog
             return existing;
         }
 
-        var actualGraphQlTypeName = graphQlTypeName ?? (isQueryRoot ? "Query" : GraphQlNaming.GetTypeName(clrType));
+        var requestedGraphQlTypeName = graphQlTypeName ?? (isQueryRoot ? "Query" : GraphQlNaming.GetTypeName(clrType));
+        var actualGraphQlTypeName = isQueryRoot
+            ? "Query"
+            : requestedGraphQlTypeName;
         var model = new ObjectTypeModel(clrType, actualGraphQlTypeName, isQueryRoot);
         _models.Add(clrType, model);
         return model;
@@ -143,6 +146,8 @@ internal sealed class CollectionSchemaCatalog
                 GetOrCreateModel(collectionField.ElementType);
             }
         }
+
+        NormalizeGraphQlTypeNames();
     }
 
     private static bool TryResolveGeneratedScalarFields(
@@ -270,16 +275,17 @@ internal sealed class CollectionSchemaCatalog
                 elementType is not null &&
                 IsApplicationObjectType(elementType))
             {
+                var elementModel = GetOrCreateModel(elementType);
                 var collectionField = new CollectionFieldModel(
                     member,
                     graphQlName,
                     memberType,
                     elementType,
                     model.GraphQlTypeName,
-                    GraphQlNaming.GetTypeName(elementType));
+                    elementModel.GraphQlTypeName);
 
                 model.CollectionFields.Add(collectionField);
-                PopulateModel(GetOrCreateModel(elementType));
+                PopulateModel(elementModel);
                 continue;
             }
 
@@ -293,6 +299,99 @@ internal sealed class CollectionSchemaCatalog
             {
                 model.ObjectFields.Add(new ObjectReferenceFieldModel(member, graphQlName, memberType));
                 PopulateModel(GetOrCreateModel(memberType));
+            }
+        }
+
+        NormalizeGraphQlTypeNames();
+    }
+
+    private void NormalizeGraphQlTypeNames()
+    {
+        var models = _models.Values.ToArray();
+        var candidateMap = models
+            .Where(model => !model.IsQueryRoot)
+            .ToDictionary(
+                model => model,
+                model => GetTypeNameCandidates(model).ToArray());
+        var assignedNames = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var model in models.Where(model => model.IsQueryRoot))
+        {
+            model.GraphQlTypeName = "Query";
+            assignedNames.Add("Query");
+        }
+
+        foreach (var model in models
+                     .Where(model => !model.IsQueryRoot)
+                     .OrderBy(model => model.ClrType.FullName, StringComparer.Ordinal))
+        {
+            foreach (var candidate in candidateMap[model])
+            {
+                if (assignedNames.Contains(candidate))
+                {
+                    continue;
+                }
+
+                var isUniqueCandidate = candidateMap
+                    .Where(pair => !ReferenceEquals(pair.Key, model))
+                    .All(pair => !pair.Value.Contains(candidate, StringComparer.Ordinal));
+
+                if (isUniqueCandidate)
+                {
+                    model.GraphQlTypeName = candidate;
+                    assignedNames.Add(candidate);
+                    goto NextModel;
+                }
+            }
+
+            var suffix = 2;
+            while (true)
+            {
+                var candidate = model.RequestedGraphQlTypeName + suffix.ToString();
+                if (assignedNames.Add(candidate))
+                {
+                    model.GraphQlTypeName = candidate;
+                    break;
+                }
+
+                suffix++;
+            }
+
+        NextModel:
+            continue;
+        }
+
+        foreach (var model in models)
+        {
+            for (var index = 0; index < model.CollectionFields.Count; index++)
+            {
+                var field = model.CollectionFields[index];
+                var elementTypeName = _models.TryGetValue(field.ElementType, out var elementModel)
+                    ? elementModel.GraphQlTypeName
+                    : field.ElementTypeName;
+
+                if (!string.Equals(field.HostTypeName, model.GraphQlTypeName, StringComparison.Ordinal) ||
+                    !string.Equals(field.ElementTypeName, elementTypeName, StringComparison.Ordinal))
+                {
+                    model.CollectionFields[index] = field with
+                    {
+                        HostTypeName = model.GraphQlTypeName,
+                        ElementTypeName = elementTypeName
+                    };
+                }
+            }
+        }
+    }
+
+    private static IEnumerable<string> GetTypeNameCandidates(ObjectTypeModel model)
+    {
+        yield return model.RequestedGraphQlTypeName;
+
+        foreach (var candidate in GraphQlNaming.GetTypeNameCandidates(model.ClrType))
+        {
+            if (!string.Equals(candidate, model.RequestedGraphQlTypeName, StringComparison.Ordinal))
+            {
+                yield return candidate;
             }
         }
     }

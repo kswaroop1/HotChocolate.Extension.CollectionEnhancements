@@ -226,6 +226,48 @@ public sealed class SourceGeneratorCoverageTests
     }
 
     [Fact]
+    public void ModelDiscovery_ShouldDisambiguateTypes_WithCollidingSimpleNames()
+    {
+        var compilation = CreateCompilation(
+            """
+            using System;
+            using System.Collections.Generic;
+            using HotChocolate.Extension.CollectionEnhancements;
+
+            [CollectionEnhancementModel(IsQueryRoot = true)]
+            public sealed class Query
+            {
+                public IReadOnlyList<Collision.Region.Alpha.Order> GetRegionalOrders() => Array.Empty<Collision.Region.Alpha.Order>();
+                public IReadOnlyList<Collision.Sales.Alpha.Order> GetSalesOrders() => Array.Empty<Collision.Sales.Alpha.Order>();
+            }
+
+            namespace Collision.Region.Alpha
+            {
+                public sealed record Order(int Id, string Code);
+            }
+
+            namespace Collision.Sales.Alpha
+            {
+                public sealed record Order(int Id, decimal Total);
+            }
+            """);
+
+        var model = CollectionEnhancementSourceGenerator.ModelDiscovery.Discover(compilation);
+        var objectTypes = model.ObjectTypes.Where(type => !type.IsQueryRoot).ToArray();
+
+        Assert.Contains(objectTypes, type => type.GraphQlTypeName == "RegionAlphaOrder");
+        Assert.Contains(objectTypes, type => type.GraphQlTypeName == "SalesAlphaOrder");
+        Assert.Equal(
+            ["RegionAlphaOrder", "SalesAlphaOrder"],
+            objectTypes.Select(type => type.GraphQlTypeName).OrderBy(name => name, StringComparer.Ordinal).ToArray());
+
+        var queryRoot = Assert.Single(model.ObjectTypes.Where(type => type.IsQueryRoot));
+        Assert.Equal(
+            ["RegionAlphaOrder", "SalesAlphaOrder"],
+            queryRoot.CollectionFields.Select(field => field.ElementGraphQlTypeName).OrderBy(name => name, StringComparer.Ordinal).ToArray());
+    }
+
+    [Fact]
     public void Generator_InternalHelpers_ShouldCoverRemainingBranches()
     {
         var compilation = CreateCompilation(

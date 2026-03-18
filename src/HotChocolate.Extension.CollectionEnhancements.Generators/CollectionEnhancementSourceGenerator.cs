@@ -73,7 +73,7 @@ public sealed class CollectionEnhancementSourceGenerator : IIncrementalGenerator
             }
 
             return new GenerationModel(
-                discoveredTypes.Values
+                NormalizeGraphQlTypeNames(discoveredTypes)
                     .OrderBy(type => type.GraphQlTypeName, StringComparer.Ordinal)
                     .ToImmutableArray());
         }
@@ -170,6 +170,117 @@ public sealed class CollectionEnhancementSourceGenerator : IIncrementalGenerator
                 scalarFields.ToImmutable(),
                 objectFields.ToImmutable(),
                 collectionFields.ToImmutable());
+        }
+
+        private static ImmutableArray<ObjectTypeInfo> NormalizeGraphQlTypeNames(
+            IReadOnlyDictionary<INamedTypeSymbol, ObjectTypeInfo> discoveredTypes)
+        {
+            var nameMap = BuildUniqueGraphQlTypeNameMap(discoveredTypes);
+            var nameMapByTypeName = nameMap.ToDictionary(
+                pair => pair.Key.ToDisplayString(FullyQualifiedTypeFormat),
+                pair => pair.Value,
+                StringComparer.Ordinal);
+
+            return discoveredTypes
+                .Select(pair =>
+                {
+                    var type = pair.Key;
+                    var objectType = pair.Value;
+                    var graphQlTypeName = objectType.IsQueryRoot ? "Query" : nameMap[type];
+
+                    return objectType with
+                    {
+                        GraphQlTypeName = graphQlTypeName,
+                        CollectionFields = objectType.CollectionFields
+                            .Select(field => field with
+                            {
+                                HostTypeName = graphQlTypeName,
+                                ElementGraphQlTypeName = TryGetMappedGraphQlTypeName(nameMapByTypeName, field.ElementTypeName, field.ElementGraphQlTypeName),
+                                FlatPaths = field.FlatPaths
+                                    .Select(path => path with
+                                    {
+                                        TerminalGraphQlTypeName = TryGetMappedGraphQlTypeName(nameMapByTypeName, path.TerminalTypeName, path.TerminalGraphQlTypeName)
+                                    })
+                                    .ToImmutableArray()
+                            })
+                            .ToImmutableArray()
+                    };
+                })
+                .ToImmutableArray();
+        }
+
+        private static string TryGetMappedGraphQlTypeName(
+            IReadOnlyDictionary<string, string> nameMapByTypeName,
+            string typeName,
+            string fallbackName) =>
+            nameMapByTypeName.TryGetValue(typeName, out var graphQlTypeName)
+                ? graphQlTypeName
+                : fallbackName;
+
+        private static IReadOnlyDictionary<INamedTypeSymbol, string> BuildUniqueGraphQlTypeNameMap(
+            IReadOnlyDictionary<INamedTypeSymbol, ObjectTypeInfo> discoveredTypes)
+        {
+            var candidateMap = discoveredTypes
+                .Where(candidate => !candidate.Value.IsQueryRoot)
+                .ToDictionary(
+                    candidate => candidate.Key,
+                    candidate => GetGraphQlTypeNameCandidates(candidate.Key).ToArray(),
+                    SymbolEqualityComparer.Default);
+            var assignedNames = new HashSet<string>(StringComparer.Ordinal);
+            var nameMap = new Dictionary<INamedTypeSymbol, string>(SymbolEqualityComparer.Default);
+
+            foreach (var pair in discoveredTypes
+                         .Where(candidate => candidate.Value.IsQueryRoot)
+                         .OrderBy(candidate => candidate.Key.ToDisplayString(FullyQualifiedTypeFormat), StringComparer.Ordinal))
+            {
+                nameMap[pair.Key] = "Query";
+                assignedNames.Add("Query");
+            }
+
+            foreach (var pair in discoveredTypes
+                         .Where(candidate => !candidate.Value.IsQueryRoot)
+                         .OrderBy(candidate => candidate.Key.ToDisplayString(FullyQualifiedTypeFormat), StringComparer.Ordinal))
+            {
+                foreach (var candidateName in candidateMap[pair.Key])
+                {
+                    if (assignedNames.Contains(candidateName))
+                    {
+                        continue;
+                    }
+
+                    var isUniqueCandidate = candidateMap
+                        .Where(candidate => !SymbolEqualityComparer.Default.Equals(candidate.Key, pair.Key))
+                        .All(candidate => !candidate.Value.Contains(candidateName, StringComparer.Ordinal));
+
+                    if (isUniqueCandidate)
+                    {
+                        nameMap[pair.Key] = candidateName;
+                        assignedNames.Add(candidateName);
+                        goto NextCandidate;
+                    }
+                }
+
+                if (!nameMap.ContainsKey(pair.Key))
+                {
+                    var suffix = 2;
+                    while (true)
+                    {
+                        var candidateName = GetGraphQlTypeName(pair.Key) + suffix.ToString();
+                        if (assignedNames.Add(candidateName))
+                        {
+                            nameMap[pair.Key] = candidateName;
+                            break;
+                        }
+
+                        suffix++;
+                    }
+                }
+
+            NextCandidate:
+                continue;
+            }
+
+            return nameMap;
         }
 
         private static ImmutableArray<FlatPathInfo> DiscoverFlatPaths(INamedTypeSymbol elementType)
@@ -543,6 +654,31 @@ public sealed class CollectionEnhancementSourceGenerator : IIncrementalGenerator
             return builder.ToString();
         }
 
+        private static IEnumerable<string> GetGraphQlTypeNameCandidates(INamedTypeSymbol type)
+        {
+            var baseName = GetGraphQlTypeName(type);
+            yield return baseName;
+
+            var prefix = string.Empty;
+            foreach (var segment in GetNamespaceSegments(type.ContainingNamespace).Reverse())
+            {
+                var sanitizedSegment = SanitizeTypeNameSegment(segment);
+                if (string.IsNullOrEmpty(sanitizedSegment))
+                {
+                    continue;
+                }
+
+                prefix = sanitizedSegment + prefix;
+                yield return prefix + baseName;
+            }
+
+            var assemblySegment = SanitizeTypeNameSegment(type.ContainingAssembly?.Name ?? string.Empty);
+            if (!string.IsNullOrEmpty(assemblySegment))
+            {
+                yield return assemblySegment + baseName;
+            }
+        }
+
         private static void AppendGraphQlTypeName(StringBuilder builder, INamedTypeSymbol type)
         {
             if (type.ContainingType is not null)
@@ -556,6 +692,45 @@ public sealed class CollectionEnhancementSourceGenerator : IIncrementalGenerator
             {
                 builder.Append(GetGraphQlTypeName(typeArgument));
             }
+        }
+
+        private static IEnumerable<string> GetNamespaceSegments(INamespaceSymbol namespaceSymbol)
+        {
+            var segments = new Stack<string>();
+            var current = namespaceSymbol;
+
+            while (current is not null && !current.IsGlobalNamespace)
+            {
+                segments.Push(current.Name);
+                current = current.ContainingNamespace;
+            }
+
+            return segments;
+        }
+
+        private static string SanitizeTypeNameSegment(string value)
+        {
+            var builder = new StringBuilder(value.Length);
+
+            foreach (var character in value)
+            {
+                if (char.IsLetterOrDigit(character))
+                {
+                    builder.Append(character);
+                }
+            }
+
+            if (builder.Length == 0)
+            {
+                return string.Empty;
+            }
+
+            var sanitized = builder.ToString();
+            sanitized = char.ToUpperInvariant(sanitized[0]) + sanitized.Substring(1);
+
+            return char.IsDigit(sanitized[0])
+                ? "N" + sanitized
+                : sanitized;
         }
 
         private static string GetTypeName(ITypeSymbol type) =>

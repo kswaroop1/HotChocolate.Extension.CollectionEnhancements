@@ -2,12 +2,14 @@ namespace HotChocolate.Extension.CollectionEnhancements.Metadata;
 
 internal sealed class ObjectTypeModel(
     Type clrType,
-    string graphQlTypeName,
+    string requestedGraphQlTypeName,
     bool isQueryRoot)
 {
     public Type ClrType { get; } = clrType;
 
-    public string GraphQlTypeName { get; } = graphQlTypeName;
+    public string RequestedGraphQlTypeName { get; } = requestedGraphQlTypeName;
+
+    public string GraphQlTypeName { get; internal set; } = requestedGraphQlTypeName;
 
     public bool IsQueryRoot { get; } = isQueryRoot;
 

@@ -1294,6 +1294,30 @@ public sealed class SchemaAndExecutionCoverageTests
     }
 
     [Fact]
+    public async Task Registrar_ShouldSkipObjectSortType_ForQueryRoots_And_ScalarlessObjects()
+    {
+        var catalog = new CollectionSchemaCatalog();
+        var queryModel = Assert.IsType<ObjectTypeModel>(
+            ReflectionTestSupport.InvokeInstance(catalog, "GetOrCreateModel", typeof(PrimaryQueryRoot), true)!);
+        ReflectionTestSupport.InvokeInstance(catalog, "PopulateModel", queryModel);
+        var scalarlessModel = Assert.IsType<ObjectTypeModel>(
+            ReflectionTestSupport.InvokeInstance(catalog, "GetOrCreateModel", typeof(ScalarlessSchemaRow), false)!);
+        ReflectionTestSupport.InvokeInstance(catalog, "PopulateModel", scalarlessModel);
+        var registrar = new CollectionEnhancementTypeRegistrar(catalog);
+
+        var services = new ServiceCollection();
+        var builder = services.AddGraphQLServer().AddQueryType<PrimaryQueryRoot>(descriptor => descriptor.Name("Query"));
+        ReflectionTestSupport.InvokeInstance(registrar, "RegisterSharedTypes", builder);
+        ReflectionTestSupport.InvokeInstance(registrar, "RegisterObjectSortType", builder, queryModel);
+        ReflectionTestSupport.InvokeInstance(registrar, "RegisterObjectSortType", builder, scalarlessModel);
+
+        await using var serviceProvider = services.BuildServiceProvider();
+        var executor = await serviceProvider.GetRequiredService<IRequestExecutorResolver>().GetRequestExecutorAsync();
+        var schema = executor.Schema.Print();
+        Assert.DoesNotContain("ScalarlessSchemaRowSortInput", schema, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Registrar_ShouldSuppressFlatSurfaces_WhenNoExpandPathsExist()
     {
         var catalog = new CollectionSchemaCatalog();
@@ -1337,6 +1361,56 @@ public sealed class SchemaAndExecutionCoverageTests
         Assert.False((bool)ReflectionTestSupport.InvokeInstance(registrar, "SupportsOrdering", rowsField, true)!);
         Assert.False((bool)ReflectionTestSupport.InvokeInstance(registrar, "SupportsGrouping", rowsField, true)!);
         Assert.False((bool)ReflectionTestSupport.InvokeInstance(registrar, "SupportsFlatRows", rowsField)!);
+    }
+
+    [Fact]
+    public async Task Registrar_ShouldBuildSchema_For_MultipleQueryRoots_And_CollidingElementNames()
+    {
+        var catalog = new CollectionSchemaCatalog();
+        foreach (var rootType in new[] { typeof(PrimaryQueryRoot), typeof(SecondaryQueryRoot) })
+        {
+            var model = Assert.IsType<ObjectTypeModel>(
+                ReflectionTestSupport.InvokeInstance(catalog, "GetOrCreateModel", rootType, true)!);
+            ReflectionTestSupport.InvokeInstance(catalog, "PopulateModel", model);
+        }
+
+        var services = new ServiceCollection();
+        var options = new CollectionEnhancementOptions();
+        services.AddSingleton(catalog);
+        services.AddSingleton(options);
+        services.AddSingleton(sp => new CollectionExecutionEngine(
+            sp.GetRequiredService<CollectionSchemaCatalog>(),
+            sp.GetRequiredService<CollectionEnhancementOptions>()));
+
+        var builder = services
+            .AddGraphQLServer()
+            .AddQueryType<PrimaryQueryRoot>(descriptor => descriptor.Name("Query"))
+            .AddCostAnalyzer()
+            .ModifyCostOptions(costOptions =>
+            {
+                costOptions.MaxFieldCost = 500_000;
+                costOptions.MaxTypeCost = 500_000;
+                costOptions.EnforceCostLimits = false;
+                costOptions.ApplyCostDefaults = true;
+                costOptions.ApplySlicingArgumentDefaultValue = true;
+            })
+            .AddProjections()
+            .AddFiltering()
+            .AddSorting();
+        builder.AddHttpRequestInterceptor<CollectionEnhancementHttpRequestInterceptor>();
+        services.AddHttpResponseFormatter<CollectionEnhancementHttpResponseFormatter>();
+
+        new CollectionEnhancementTypeRegistrar(catalog).Register(builder);
+
+        await using var serviceProvider = services.BuildServiceProvider();
+        var executor = await serviceProvider.GetRequiredService<IRequestExecutorResolver>().GetRequestExecutorAsync();
+        var schema = executor.Schema.Print();
+
+        Assert.Contains("regionalOrdersAggregate", schema, StringComparison.Ordinal);
+        Assert.Contains("RegionAlphaOrderFilterInput", schema, StringComparison.Ordinal);
+        Assert.Contains("SalesAlphaOrderFilterInput", schema, StringComparison.Ordinal);
+        Assert.DoesNotContain("input QueryFilterInput", schema, StringComparison.Ordinal);
+        Assert.DoesNotContain("input QuerySortInput", schema, StringComparison.Ordinal);
     }
 
     [Fact]

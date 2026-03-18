@@ -129,6 +129,26 @@ public sealed class MetadataUtilityCoverageTests
     }
 
     [Fact]
+    public void GraphQlNaming_ShouldCoverCandidateAndSanitizationBranches()
+    {
+        var emptyAssembly = AssemblyBuilder.DefineDynamicAssembly(new AssemblyName("!!!"), AssemblyBuilderAccess.Run);
+        var emptyModule = emptyAssembly.DefineDynamicModule("Main");
+        var globalType = emptyModule.DefineType("GlobalType", TypeAttributes.Public | TypeAttributes.Class).CreateType();
+        Assert.Equal(["GlobalType"], GraphQlNaming.GetTypeNameCandidates(globalType));
+
+        var numericAssembly = AssemblyBuilder.DefineDynamicAssembly(new AssemblyName("123-coverage"), AssemblyBuilderAccess.Run);
+        var numericModule = numericAssembly.DefineDynamicModule("Main");
+        var numericType = numericModule.DefineType("Coverage.NumericType", TypeAttributes.Public | TypeAttributes.Class).CreateType();
+        var candidates = GraphQlNaming.GetTypeNameCandidates(numericType);
+        Assert.Contains("NumericType", candidates);
+        Assert.Contains("CoverageNumericType", candidates);
+        Assert.Contains("N123coverageNumericType", candidates);
+
+        Assert.Equal(string.Empty, ReflectionTestSupport.InvokeStatic(typeof(GraphQlNaming), "SanitizeTypeNameSegment", "!!!"));
+        Assert.Equal("N123coverage", ReflectionTestSupport.InvokeStatic(typeof(GraphQlNaming), "SanitizeTypeNameSegment", "123-coverage"));
+    }
+
+    [Fact]
     public void MemberAccessor_ShouldReadPropertyFieldAndMethod_AndRejectUnsupportedMembers()
     {
         var host = new DummyHost("sample");
@@ -278,6 +298,127 @@ public sealed class MetadataUtilityCoverageTests
         Assert.DoesNotContain(catalog.ObjectTypes, type => type.ClrType == typeof(Exception));
         Assert.DoesNotContain(catalog.ObjectTypes, type => type.GraphQlTypeName.Contains("TaskAwait", StringComparison.Ordinal));
         Assert.DoesNotContain(catalog.ObjectTypes, type => type.GraphQlTypeName.Contains("Comparer", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void CollectionSchemaCatalog_ShouldDisambiguateTypes_WithCollidingSimpleNames()
+    {
+        var catalog = new CollectionSchemaCatalog();
+        var queryModel = Assert.IsType<ObjectTypeModel>(
+            ReflectionTestSupport.InvokeInstance(catalog, "GetOrCreateModel", typeof(DuplicateNameQuery), true)!);
+        ReflectionTestSupport.InvokeInstance(catalog, "PopulateModel", queryModel);
+
+        var regionalModel = catalog.TryGetObjectType(typeof(Collision.Region.Alpha.Order));
+        var salesModel = catalog.TryGetObjectType(typeof(Collision.Sales.Alpha.Order));
+
+        Assert.NotNull(regionalModel);
+        Assert.NotNull(salesModel);
+        Assert.Equal("RegionAlphaOrder", regionalModel.GraphQlTypeName);
+        Assert.Equal("SalesAlphaOrder", salesModel.GraphQlTypeName);
+        Assert.NotEqual(regionalModel.GraphQlTypeName, salesModel.GraphQlTypeName);
+
+        var regionalOrders = queryModel.FindCollection("regionalOrders");
+        var salesOrders = queryModel.FindCollection("salesOrders");
+        Assert.NotNull(regionalOrders);
+        Assert.NotNull(salesOrders);
+        Assert.Equal("RegionAlphaOrder", regionalOrders.ElementTypeName);
+        Assert.Equal("SalesAlphaOrder", salesOrders.ElementTypeName);
+    }
+
+    [Fact]
+    public void CollectionSchemaCatalog_ShouldCoverSuffixFallback_And_CollectionFieldRewriteBranches()
+    {
+        var firstAssembly = AssemblyBuilder.DefineDynamicAssembly(new AssemblyName("CollisionCoverage"), AssemblyBuilderAccess.Run);
+        var firstModule = firstAssembly.DefineDynamicModule("Main");
+        var firstType = firstModule.DefineType("Coverage.Shared.Order", TypeAttributes.Public | TypeAttributes.Class).CreateType();
+
+        var secondAssembly = AssemblyBuilder.DefineDynamicAssembly(new AssemblyName("CollisionCoverage"), AssemblyBuilderAccess.Run);
+        var secondModule = secondAssembly.DefineDynamicModule("Main");
+        var secondType = secondModule.DefineType("Coverage.Shared.Order", TypeAttributes.Public | TypeAttributes.Class).CreateType();
+
+        var catalog = new CollectionSchemaCatalog();
+        var firstModel = Assert.IsType<ObjectTypeModel>(ReflectionTestSupport.InvokeInstance(catalog, "GetOrCreateModel", firstType, false)!);
+        var secondModel = Assert.IsType<ObjectTypeModel>(ReflectionTestSupport.InvokeInstance(catalog, "GetOrCreateModel", secondType, false)!);
+        ReflectionTestSupport.InvokeInstance(catalog, "NormalizeGraphQlTypeNames");
+
+        Assert.Equal("Order2", firstModel.GraphQlTypeName);
+        Assert.Equal("Order3", secondModel.GraphQlTypeName);
+
+        var hostModel = Assert.IsType<ObjectTypeModel>(
+            ReflectionTestSupport.InvokeInstance(catalog, "GetOrCreateModel", typeof(ManualCollectionRewriteHost), false)!);
+        hostModel.CollectionFields.Add(new CollectionFieldModel(
+            typeof(ManualCollectionRewriteHost).GetProperty(nameof(ManualCollectionRewriteHost.Values))!,
+            "values",
+            typeof(string[]),
+            typeof(string),
+            hostModel.GraphQlTypeName,
+            "String"));
+
+        ReflectionTestSupport.InvokeInstance(catalog, "NormalizeGraphQlTypeNames");
+        var manualField = Assert.Single(hostModel.CollectionFields);
+        Assert.Equal(hostModel.GraphQlTypeName, manualField.HostTypeName);
+        Assert.Equal("String", manualField.ElementTypeName);
+    }
+
+    [Fact]
+    public void CollectionSchemaCatalog_ShouldCoverAssignedCandidateAndKnownElementRewriteBranches()
+    {
+        var catalog = new CollectionSchemaCatalog();
+        var queryModel = Assert.IsType<ObjectTypeModel>(
+            ReflectionTestSupport.InvokeInstance(catalog, "GetOrCreateModel", typeof(AssignedCandidateCollisionQuery), true)!);
+        ReflectionTestSupport.InvokeInstance(catalog, "PopulateModel", queryModel);
+
+        var billingModel = catalog.TryGetObjectType(typeof(Collision.Billing.Region.Alpha.Order));
+        var salesModel = catalog.TryGetObjectType(typeof(Collision.Sales.Region.Alpha.Order));
+        Assert.NotNull(billingModel);
+        Assert.NotNull(salesModel);
+        Assert.Equal("BillingRegionAlphaOrder", billingModel.GraphQlTypeName);
+        Assert.Equal("SalesRegionAlphaOrder", salesModel.GraphQlTypeName);
+
+        var rewriteHost = Assert.IsType<ObjectTypeModel>(
+            ReflectionTestSupport.InvokeInstance(catalog, "GetOrCreateModel", typeof(KnownCollectionRewriteHost), false)!);
+        rewriteHost.CollectionFields.Add(new CollectionFieldModel(
+            typeof(KnownCollectionRewriteHost).GetProperty(nameof(KnownCollectionRewriteHost.Orders))!,
+            "billingOrders",
+            typeof(Collision.Billing.Region.Alpha.Order[]),
+            typeof(Collision.Billing.Region.Alpha.Order),
+            rewriteHost.GraphQlTypeName,
+            "Order"));
+
+        ReflectionTestSupport.InvokeInstance(catalog, "NormalizeGraphQlTypeNames");
+
+        var rewrittenField = Assert.Single(rewriteHost.CollectionFields);
+        Assert.Equal(rewriteHost.GraphQlTypeName, rewrittenField.HostTypeName);
+        Assert.Equal("BillingRegionAlphaOrder", rewrittenField.ElementTypeName);
+    }
+
+    [Fact]
+    public void CollectionSchemaCatalog_ShouldRewriteHostTypeNames_AndSkipReservedQueryCandidates()
+    {
+        var catalog = new CollectionSchemaCatalog();
+        var queryModel = Assert.IsType<ObjectTypeModel>(
+            ReflectionTestSupport.InvokeInstance(catalog, "GetOrCreateModel", typeof(ReservedQueryNameCollisionRoot), true)!);
+        ReflectionTestSupport.InvokeInstance(catalog, "PopulateModel", queryModel);
+
+        var reservedQueryModel = catalog.TryGetObjectType(typeof(Collision.Model.Query));
+        Assert.NotNull(reservedQueryModel);
+        Assert.Equal("ModelQuery", reservedQueryModel.GraphQlTypeName);
+
+        var rewriteHost = Assert.IsType<ObjectTypeModel>(
+            ReflectionTestSupport.InvokeInstance(catalog, "GetOrCreateModel", typeof(HostMismatchRewriteHost), false)!);
+        rewriteHost.CollectionFields.Add(new CollectionFieldModel(
+            typeof(HostMismatchRewriteHost).GetProperty(nameof(HostMismatchRewriteHost.Orders))!,
+            "orders",
+            typeof(Collision.Billing.Region.Alpha.Order[]),
+            typeof(Collision.Billing.Region.Alpha.Order),
+            "LegacyHost",
+            "BillingRegionAlphaOrder"));
+
+        ReflectionTestSupport.InvokeInstance(catalog, "NormalizeGraphQlTypeNames");
+
+        var rewrittenField = Assert.Single(rewriteHost.CollectionFields);
+        Assert.Equal(rewriteHost.GraphQlTypeName, rewrittenField.HostTypeName);
+        Assert.Equal("BillingRegionAlphaOrder", rewrittenField.ElementTypeName);
     }
 
     [Fact]
@@ -649,6 +790,21 @@ public sealed class MetadataUtilityCoverageTests
     }
 
     private sealed record PopulateCoverageChild(string Name);
+
+    private sealed class ManualCollectionRewriteHost
+    {
+        public string[] Values { get; init; } = [];
+    }
+
+    private sealed class KnownCollectionRewriteHost
+    {
+        public Collision.Billing.Region.Alpha.Order[] Orders { get; init; } = [];
+    }
+
+    private sealed class HostMismatchRewriteHost
+    {
+        public Collision.Billing.Region.Alpha.Order[] Orders { get; init; } = [];
+    }
 
     private sealed class NullKeyDictionary : IDictionary
     {
